@@ -40,6 +40,13 @@ const MAX_PLUGIN_FILES = 20_000;
 const MAX_PLUGIN_BYTES = 512 * 1024 * 1024;
 const MAX_PLUGIN_FILE_BYTES = 128 * 1024 * 1024;
 
+function removePluginTree(path: string): void {
+  // Package managers and antivirus scanners can briefly retain handles after a
+  // child process exits on Windows. Node retries EPERM/EBUSY only when these
+  // options are provided for recursive removal.
+  rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 function validatePortableRelativePath(path: string): void {
   if (path.length > 400) throw new Error(`插件路径过长：${path.slice(0, 80)}…`);
   for (const segment of path.replaceAll('\\', '/').split('/')) {
@@ -546,7 +553,7 @@ export class PluginManager {
         package: inspectPluginPackage(manifestRoot),
       };
     } finally {
-      rmSync(temporary, { recursive: true, force: true });
+      removePluginTree(temporary);
     }
   }
 
@@ -682,10 +689,10 @@ export class PluginManager {
         this.setLock(scope, manifest.id, hashDirectory(destination));
         this.refresh();
         await this.activate(manifest.id);
-        if (hadPrevious && existsSync(backup) && isWithin(targetRoot, backup)) rmSync(backup, { recursive: true, force: true });
+        if (hadPrevious && existsSync(backup) && isWithin(targetRoot, backup)) removePluginTree(backup);
       } catch (error) {
         await this.deactivate(manifest.id).catch(() => undefined);
-        if (existsSync(destination) && isWithin(targetRoot, destination)) rmSync(destination, { recursive: true, force: true });
+        if (existsSync(destination) && isWithin(targetRoot, destination)) removePluginTree(destination);
         if (hadPrevious && existsSync(backup) && isWithin(targetRoot, backup)) renameSync(backup, destination);
         if (hadPrevious) {
           if (previousLock === undefined) this.deleteLock(scope, manifest.id);
@@ -702,11 +709,11 @@ export class PluginManager {
         }
         throw error;
       }
-      rmSync(staging, { recursive: true, force: true });
+      removePluginTree(staging);
       this.refresh();
       return this.require(manifest.id);
     } catch (error) {
-      if (existsSync(staging) && isWithin(targetRoot, staging)) rmSync(staging, { recursive: true, force: true });
+      if (existsSync(staging) && isWithin(targetRoot, staging)) removePluginTree(staging);
       throw error;
     }
   }
@@ -716,7 +723,7 @@ export class PluginManager {
     await this.deactivate(id);
     const allowedRoot = plugin.scope === 'user' ? this.#userRoot : this.#projectRoot;
     if (!isWithin(allowedRoot, plugin.root) || resolve(plugin.root) === resolve(allowedRoot)) throw new Error('拒绝删除未验证的插件路径');
-    rmSync(plugin.root, { recursive: true, force: true });
+    removePluginTree(plugin.root);
     delete this.#enabled[id];
     delete this.#settings[id];
     this.deleteLock(plugin.scope, id);
