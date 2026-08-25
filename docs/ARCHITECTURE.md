@@ -1,0 +1,96 @@
+# Sci Workplace 架构说明
+
+## 1. 边界
+
+Sci Workplace Core 只管理 Harness 通用能力：服务生命周期、事件、模型调用、工具执行、权限、上下文、Agent 协作和科研通用对象。文献检索、PDF 解析、统计分析、Notebook、引用管理和论文写作均由后续扩展提供。
+
+核心模块不能被外部插件替换：
+
+- 微内核与作用域；
+- SQLite 事件库；
+- Agent loop；
+- 权限与审批；
+- 项目路径边界。
+
+## 2. 进程模型
+
+Electron Main 创建安全窗口并管理 Runtime 子进程。Runtime 随机选择端口，只监听 `127.0.0.1`；主进程生成 256-bit 临时令牌。Renderer 通过 preload 获取连接信息，使用 Bearer token 和 WebSocket 通信，但没有 Node 权限。
+
+DeepSeek 请求、文件系统、终端、MCP 和插件进程全部位于 Runtime 侧。DeepSeek Key 只在 Electron Main 的加密文件和 Runtime 内存中出现。
+
+## 3. 微内核
+
+`@openlab/kernel` 提供：
+
+- `ServiceToken<T>`：稳定、类型化服务标识；事件库、审批、工具注册表等特权服务使用 `sealed` Token，后代作用域即使构造同名 Token 也不能覆盖；
+- `KernelModule<TConfig>`：模块 ID、版本、依赖、作用域和健康检查；
+- `KernelScope`：严格执行 `app → project → session → agent`，拒绝跨级或嵌套 Agent；模块在隔离的候选子作用域启动；
+- `Effect`：资源 setup/disposer，逆序、幂等、异步释放；
+- `EventBus`：观察型 `publish`、顺序型 `serial`、拦截型 `pipeline`；
+- `Registry<T>`：工具、模型、上下文和贡献项的动态注册；
+- `Kernel.hotSwap`：候选启动与健康检查通过后原子切换，失败保留旧实例；候选解析服务时排除同模块旧实例，避免健康检查误用旧服务而产生假成功。
+
+模块图在应用前完成缺失依赖和循环诊断，也允许后续批次依赖同一作用域内已经激活的模块。批量启动失败时逆序回滚。
+
+## 4. 事件与投影
+
+SQLite WAL 是运行状态事实源。所有状态界面都是事件投影；项目 `.openlab` 文件用于可移植科研元数据和产物索引，不替代会话事件。投影文件损坏或缺失时从事件重建；投影领先于事件的异常状态会被拒绝或调和，避免静默覆盖事实源。
+
+关键不变量是“模型可见即已记录”：`context.compiled` 和 `model.requested` 在 Provider 调用前提交，包含贡献来源、最终消息投影和工具 schema。模型流按批次写入 `model.chunk_batch`，最终消息写入 `message.recorded`。
+
+重启时 Runtime 重放 `timeline.append`/`timeline.patch`、消息、Agent 定义、项目/会话绑定、能力快照、记忆、任务和频道事件。未完成节点与审批标记为 `interrupted`/`expired`，已经落盘的 chunk 原样保留。会话 fork 复制可回放事件并记录来源，同时为原会话成员生成新的能力快照，而不是复制不可审计的内存状态。
+
+## 5. Agent loop
+
+```text
+user input
+  → context contributions
+  → deterministic budget/compiler
+  → record model-visible request
+  → provider stream
+  → tool calls
+  → approval policy
+  → execute + record result
+  → next step or finish turn
+```
+
+每轮最多 12 个模型 step，避免无界工具循环。工具参数使用 JSON Schema/Ajv 验证。`read_only` 会在送模前移除变更型工具，而不只是在执行阶段拒绝。写入与删除工具先生成 unified diff，批准后创建 SHA-256 变更集和快照；撤销会校验当前哈希，防止覆盖后续修改。
+
+全新安装在用户确认前没有 Agent；首次引导只创建用户命名并确认的一名角色。此后所有 Agent 都来自用户创建、角色卡导入或对模板的明确确认，插件的 `agentTemplates` 也绝不自动实例化。Agent 定义属于全局角色库，项目绑定决定可用范围；会话固定一名 `lead` 并可加入若干 `member`，首轮后主管锁定，成员只可在空闲期变更。头像可选择内置样式或本地 PNG/JPEG/WebP；本地图片在 Renderer 中中心裁切为 256×256 WebP，Runtime 校验媒体签名和 256 KB 上限后写入事件，角色卡只携带图片数据而不携带本地路径。
+
+无显式提及时由主管回答；`@Agent` 只路由给当前会话成员，成员并行完成明确任务后由主管收敛。模型工具只能使用 `delegate_task`、`send_agent_message`、`run_channel`、`wait_for_agent_runs` 和 `ask_lead`，不存在创建 Agent 的工具。成员不能递归委派，也不能自行把其他角色加入会话；并发上限是运行限制，不是角色数量限制。成员只接收任务、显式引用、自己的项目记忆和关联频道消息，不继承主管的完整历史。
+
+每名会话成员在加入或用户主动刷新时生成不可变的能力快照。实际工具集合是 Agent 策略、项目绑定、会话快照、频道上限、权限模式、目录授权、模型能力以及当前有效插件/MCP 的交集；插件停用或凭据撤销属于安全例外，会立即移除失效工具。
+
+记忆以 Agent × Project 隔离，只有用户手动创建的全局置顶记忆可以跨项目。自动记忆和经验默认关闭；开启后由无工具、低思考的小工具模型异步提取候选，秘密、外部资料指令、低置信内容和未经验证的事实被拒绝。事件流仍是事实源，SQLite FTS5 只是可重建检索投影；上下文中的记忆最多占 10% 或 8K token。
+
+频道是 Agent 间通信的只读用户视图。项目内 Agent 对应唯一复用私聊，用户可建立 2–6 人群聊；频道不会自主启动，只能由当前对话、显式提及或主管工具触发，并受最少/最多回复轮数约束。用户通过任务卡、补充信息、暂停、恢复、接管和取消影响协作，不能直接在频道输入。
+
+## 6. Context Compiler
+
+贡献项先按 stable/dynamic，再按优先级排序：
+
+1. 核心安全策略与稳定工具 schema；
+2. 项目指令、Agent 定义和用户置顶记忆；
+3. 固定科研对象、证据、项目记忆与经验；
+4. 当前任务、关联频道消息和插件上下文；
+5. 最近消息和工具结果；
+6. 输出预留。
+
+工具 schema 使用强制的 `request-schema` 投影，不能被普通上下文挤出；编译器同时预留最近消息和输出空间。达到 80% 时生成带原事件引用的可追溯摘要，长工具结果转为 Artifact。预算不足只改变模型投影，事件库不删除。Context Inspector 显示来源、信任级别、token 估算、纳入状态、压缩历史和稳定前缀占比。
+
+所有工具返回值在再次送模前统一包裹为不可信输出；附件、科研对象、MCP 资源和插件上下文也不能把内部文本提升为系统或用户指令。
+
+## 7. 扩展
+
+Skills 是指令贡献，不获得权限。MCP stdio/Streamable HTTP 的 tools 与 resources 进入统一 Registry、审计与不可信渲染链。TypeScript 插件由 `PluginProcess` 在独立 Node 进程运行，以 JSON-RPC 2.0/stdio 调用；工具名带长度受限的来源命名空间，避免冲突。插件可贡献 `agentTemplates`；旧 `agentPresets` 只做兼容映射，均须用户确认后才能成为角色。
+
+插件测试在临时副本执行：只接受 registry 依赖说明，移除候选目录中的包管理器配置，禁用 lifecycle scripts，完成严格类型检查、契约测试和进程健康检查。生产安装先在 staging 安装生产依赖并健康检查，再原子切换；失败保留旧版本。
+
+插件安装保存最终目录 SHA-256。项目内 `plugin-lock.json` 只是可移植投影，自动启动还必须匹配本机用户数据目录中的项目授权锁；复制项目不会在另一台机器上自动执行插件。外部插件上下文始终标记为不可信。核心只热载插件代理，不热替换生产核心模块。
+
+## 8. DeepSeek Provider
+
+Provider 直接调用 DeepSeek `/chat/completions`，业务层只接触 `ModelEvent`。SSE 解析支持 reasoning、文本、跨 chunk 工具参数、usage、结束原因和缓存 token。模型列表由 `/models` 与本地能力表合并；模型 ID 不写入 Agent loop。
+
+只有首个增量到达前的 429、超时和临时 5xx 才重试。请求支持取消，首字节与流空闲分别有超时，异常结束写入 `model.failed`，已显示的部分输出标记为中断。费用估算由可替换的版本化价格表完成。

@@ -1,0 +1,78 @@
+{
+  "name": "@openlab/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sci Workplace local-first multi-agent research harness",
+  "author": "Vasilios-Xi",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "pnpm --filter @openlab/runtime build && pnpm build && wait-on http://127.0.0.1:5173 && cross-env OPENLAB_RENDERER_URL=http://127.0.0.1:5173 electron dist/main.js",
+    "start": "electron dist/main.js",
+    "package:win": "pnpm --filter @openlab/renderer build && pnpm --filter @openlab/runtime build && pnpm build && electron-builder --win nsis",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@openlab/protocol": "workspace:*",
+    "@openlab/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "42.9.0",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^9.0.1"
+  },
+  "build": {
+    "appId": "io.sciworkplace.desktop",
+    "productName": "Sci Workplace",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/@openlab/runtime/**",
+      "node_modules/pnpm/**",
+      "node_modules/typescript/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "package.json",
+      "node_modules/**",
+      "node_modules/typescript/lib/*.d.ts"
+    ],
+    "extraResources": [
+      {
+        "from": "../renderer/dist",
+        "to": "renderer"
+      },
+      {
+        "from": "../../packages/runtime/node_modules/typescript",
+        "to": "openlab-toolchain/typescript",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../../packages/reader-runtime/dist/reader-worker",
+        "to": "reader-runtime",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "Sci-Workplace-${version}-windows-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

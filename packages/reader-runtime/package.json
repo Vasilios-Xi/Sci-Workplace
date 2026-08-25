@@ -1,0 +1,15 @@
+{
+  "name": "@openlab/reader-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bundled offline PDF reader runtime used by capability-scoped Sci Workplace extensions",
+  "scripts": {
+    "build": "node scripts/verify-source.mjs",
+    "freeze": "node scripts/freeze-runtime.mjs",
+    "bundle": "node scripts/bundle-runtime.mjs",
+    "bundle:refresh": "node scripts/bundle-runtime.mjs --refresh",
+    "verify": "node scripts/verify-runtime.mjs",
+    "test": "node scripts/verify-source.mjs"
+  }
+}

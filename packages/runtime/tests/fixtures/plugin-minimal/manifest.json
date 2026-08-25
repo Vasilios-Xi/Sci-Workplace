@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "fixture-plugin",
+  "name": "Fixture Plugin",
+  "version": "0.1.0",
+  "engine": "^0.1.0",
+  "entry": "index.mjs",
+  "permissions": [],
+  "contributes": {
+    "tools": ["ping"]
+  }
+}

@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+allowBuilds:
+  esbuild: true
+  electron: true
+  electron-winstaller: true
+overrides:
+  dompurify: 3.4.13

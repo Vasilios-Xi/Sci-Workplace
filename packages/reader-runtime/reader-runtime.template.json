@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "openlab.reader-runtime",
+  "kind": "reader-runtime",
+  "name": "Sci Workplace Reader Runtime",
+  "version": "0.1.0",
+  "workerVersion": "0.2.19",
+  "executables": {
+    "reader-worker": "reader-worker.exe"
+  },
+  "capabilities": [
+    "pdf-inspect",
+    "selectable-text",
+    "page-bbox",
+    "page-render",
+    "figure-crop",
+    "formula-source-crop",
+    "source-map",
+    "docling-structure"
+  ],
+  "network": false
+}

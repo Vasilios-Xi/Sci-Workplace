@@ -1,0 +1,336 @@
+import type {
+  AgentPreset,
+  AgentTemplate,
+  Annotation,
+  AnnotationSelector,
+  ArtifactProvenance,
+  ArtifactRevision,
+  CreateArtifactRevisionFileInput,
+  ContextContribution,
+  DocumentBuffer,
+  DocumentRevisionRef,
+  JobRecord,
+  JobSpec,
+  JsonValue,
+  ModelDescriptor,
+  ModelGenerationRecord,
+  ModelGenerationSpec,
+  ModelStructuredRunSpec,
+  PluginWorkflowDefinition,
+  PluginWorkflowResult,
+  PluginStorageEntry,
+  ResearchObject,
+  ResearchRelation,
+  ResourceHandle,
+  SourceMapDescriptor,
+  ToolchainDescriptor,
+  ToolDefinition,
+  ToolExecutionResult,
+  WorkspaceEditGroup,
+  WorkspaceEditPreview,
+  WorkspaceEditRequest,
+  WorkspaceEntry,
+  WorkspacePathRef,
+  BrowserObservation,
+  BrowserProfileSummary,
+  BrowserSessionSummary,
+  GeneratedWorktableApp,
+  WorktableContextSnapshot,
+  WorktableContent,
+  WorktableInstance,
+  WorktableRevealTarget,
+  WorktableState,
+} from '@openlab/protocol';
+
+export type {
+  Annotation,
+  AnnotationSelector,
+  ArtifactProvenance,
+  ArtifactRevision,
+  CreateArtifactRevisionFileInput,
+  DocumentRevisionRef,
+  JobOutput,
+  JobRecord,
+  JobSpec,
+  JsonSchema,
+  JsonValue,
+  ModelDescriptor,
+  ModelGenerationRecord,
+  ModelGenerationSpec,
+  ModelStructuredRunSpec,
+  PluginWorkflowDefinition,
+  PluginWorkflowResult,
+  ReasoningEffort,
+  ResearchObject,
+  ResearchRelation,
+  ResourceHandle,
+  ToolchainDescriptor,
+  ToolExecutionResult,
+  WorkspacePathRef,
+  BrowserObservation,
+  BrowserProfileSummary,
+  BrowserSessionSummary,
+  GeneratedWorktableApp,
+  WorktableContextSnapshot,
+  WorktableInstance,
+  WorktableState,
+} from '@openlab/protocol';
+
+export const OPENLAB_PLUGIN_API_VERSION = 3 as const;
+
+export type PluginHostCapability =
+  | 'workspace:read'
+  | 'workspace:edit'
+  | 'resources:read'
+  | 'jobs:run'
+  | 'models:run'
+  | 'models:invoke'
+  | 'ui'
+  | 'annotations:read'
+  | 'annotations:write'
+  | 'artifacts:write'
+  | 'research:read'
+  | 'research:write'
+  | 'plugin-storage'
+  | 'worktable:read'
+  | 'worktable:write'
+  | 'browser:observe'
+  | 'browser:interact'
+  | 'generated-apps:publish';
+
+export interface WorkspaceHostApi {
+  list(ref: WorkspacePathRef): Promise<WorkspaceEntry[]>;
+  read(ref: WorkspacePathRef): Promise<{ content: string; sha256: string; mediaType?: string }>;
+  openDocument(ref: WorkspacePathRef): Promise<DocumentBuffer>;
+  previewEdit(request: WorkspaceEditRequest): Promise<WorkspaceEditPreview>;
+  applyEdit(previewId: string, confirmed: boolean): Promise<WorkspaceEditGroup>;
+}
+
+export interface ResourceHostApi {
+  open(target: DocumentRevisionRef): Promise<ResourceHandle>;
+  read(handleId: string, start?: number, end?: number): Promise<Uint8Array>;
+  release(handleId: string): Promise<void>;
+}
+
+export interface JobHostApi {
+  run(spec: JobSpec): Promise<JobRecord>;
+  get(id: string): Promise<JobRecord>;
+  wait(id: string): Promise<JobRecord>;
+  cancel(id: string): Promise<JobRecord>;
+  log(id: string, offset?: number): Promise<{ content: string; nextOffset: number }>;
+}
+
+export interface ModelHostApi {
+  list(): Promise<ModelDescriptor[]>;
+  generate(spec: ModelGenerationSpec): Promise<ModelGenerationRecord>;
+  runStructured(spec: ModelStructuredRunSpec): Promise<ModelGenerationRecord>;
+}
+
+export interface ToolchainHostApi {
+  list(kind?: string): Promise<ToolchainDescriptor[]>;
+}
+
+export interface WorkflowHostApi {
+  start(workflowId: string, input: Record<string, JsonValue>, options?: { worktableInstanceId?: string }): Promise<JobRecord>;
+  get(id: string): Promise<JobRecord>;
+  cancel(id: string): Promise<JobRecord>;
+  pause(id: string): Promise<JobRecord>;
+  resume(id: string): Promise<JobRecord>;
+  report(id: string, update: { progress?: number; stage?: string; metadata?: Record<string, JsonValue> }): Promise<JobRecord>;
+}
+
+export interface AnnotationHostApi {
+  list(target?: DocumentRevisionRef): Promise<Annotation[]>;
+  create(input: { target: DocumentRevisionRef; selector: AnnotationSelector; comment: string }): Promise<Annotation>;
+  update(id: string, patch: { comment?: string; status?: Annotation['status'] }): Promise<Annotation>;
+}
+
+export interface ArtifactHostApi {
+  revisions(artifactId?: string): Promise<ArtifactRevision[]>;
+  createRevision(input: {
+    artifactId: string;
+    parentRevisionId?: string;
+    files: CreateArtifactRevisionFileInput[];
+    jobId?: string;
+    annotationSetIds?: string[];
+    provenance: Omit<ArtifactProvenance, 'artifactId' | 'createdAt'>;
+  }): Promise<ArtifactRevision>;
+  archive(revisionId: string, includeLargeFiles?: boolean): Promise<ArtifactRevision>;
+  registerSourceMap(map: Omit<SourceMapDescriptor, 'id' | 'projectId' | 'createdAt'>): Promise<SourceMapDescriptor>;
+}
+
+export interface ResearchHostApi {
+  objects(): Promise<ResearchObject[]>;
+  relations(): Promise<ResearchRelation[]>;
+  createObject(input: {
+    type: ResearchObject['type'];
+    title: string;
+    status?: ResearchObject['status'];
+    attributes?: Record<string, JsonValue>;
+    attachments?: ResearchObject['attachments'];
+  }): Promise<ResearchObject>;
+  createRelation(input: {
+    fromId: string;
+    predicate: ResearchRelation['predicate'];
+    toId: string;
+    evidenceIds?: string[];
+  }): Promise<ResearchRelation>;
+  /** Concise v2 aliases; legacy v2 names remain available. */
+  create(input: {
+    type: ResearchObject['type'];
+    title: string;
+    status?: ResearchObject['status'];
+    attributes?: Record<string, JsonValue>;
+    attachments?: ResearchObject['attachments'];
+  }): Promise<ResearchObject>;
+  update(id: string, patch: Partial<Pick<ResearchObject, 'title' | 'status' | 'attributes' | 'attachments'>>): Promise<ResearchObject>;
+  relate(input: {
+    fromId: string;
+    predicate: ResearchRelation['predicate'];
+    toId: string;
+    evidenceIds?: string[];
+  }): Promise<ResearchRelation>;
+}
+
+export interface WorkbenchHostApi {
+  open(input: {
+    title: string;
+    workbenchId: string;
+    document?: DocumentRevisionRef;
+    artifactId?: string;
+    artifactRevisionId?: string;
+    activeViewId: string;
+  }): Promise<{ activeTabId?: string }>;
+  reveal(input: { document: DocumentRevisionRef; selector: AnnotationSelector }): Promise<void>;
+}
+
+export interface WorktableHostApi {
+  list(): Promise<WorktableState>;
+  inspect(instanceId: string): Promise<WorktableContextSnapshot>;
+  create(input: { templateId?: string; title?: string; boundSessionId?: string; inputs?: Record<string, JsonValue> }): Promise<WorktableInstance>;
+  open(instanceId: string): Promise<WorktableInstance>;
+  update(instanceId: string, patch: { title?: string; inputs?: Record<string, JsonValue>; activeRunId?: string | null; artifactId?: string | null; artifactRevisionId?: string | null; status?: WorktableInstance['status'] }, ifRevision: number): Promise<WorktableInstance>;
+  archive(instanceId: string, ifRevision: number): Promise<WorktableInstance>;
+  bindSession(instanceId: string, sessionId?: string): Promise<WorktableInstance>;
+  reveal(input: { instanceId: string; document: DocumentRevisionRef; selector: AnnotationSelector; target?: WorktableRevealTarget }): Promise<WorktableState>;
+  mountContent(input: {
+    instanceId: string;
+    paneId: string;
+    title: string;
+    content: Extract<WorktableContent, { kind: 'document' | 'plugin-panel' }>;
+  }): Promise<WorktableInstance>;
+  mountArtifact(input: { instanceId: string; paneId: string; artifactId: string; revisionId?: string; role?: string; title?: string }): Promise<WorktableInstance>;
+  setStatus(instanceId: string, status: WorktableInstance['status']): Promise<WorktableInstance>;
+}
+
+export interface BrowserHostApi {
+  profiles(): Promise<BrowserProfileSummary[]>;
+  sessions(): Promise<BrowserSessionSummary[]>;
+  observe(sessionId: string): Promise<BrowserObservation>;
+  open(input: { instanceId: string; paneId: string; profileId: string; url: string; confirmed: boolean }): Promise<BrowserSessionSummary>;
+  act(input: { sessionId: string; observationId: string; action: 'click' | 'type' | 'select' | 'press' | 'scroll'; ref?: string; value?: string; confirmed: boolean }): Promise<BrowserSessionSummary>;
+}
+
+export interface GeneratedAppHostApi {
+  list(): Promise<GeneratedWorktableApp[]>;
+  publish(input: { title: string; source: WorkspacePathRef; entry: string; networkDomains?: string[]; hostCapabilities?: string[]; confirmed: boolean }): Promise<GeneratedWorktableApp>;
+}
+
+export interface PluginStorageApi {
+  get(scope: PluginStorageEntry['scope'], key: string): Promise<PluginStorageEntry | undefined>;
+  put(scope: PluginStorageEntry['scope'], key: string, value: JsonValue, ifRevision?: number): Promise<PluginStorageEntry>;
+  delete(scope: PluginStorageEntry['scope'], key: string, ifRevision?: number): Promise<void>;
+  list(scope: PluginStorageEntry['scope'], prefix?: string): Promise<PluginStorageEntry[]>;
+}
+
+export interface PluginHost {
+  readonly capabilities: PluginHostCapability[];
+  workspace: WorkspaceHostApi;
+  resources: ResourceHostApi;
+  jobs: JobHostApi;
+  models: ModelHostApi;
+  toolchains: ToolchainHostApi;
+  workflows: WorkflowHostApi;
+  annotations: AnnotationHostApi;
+  artifacts: ArtifactHostApi;
+  research: ResearchHostApi;
+  storage: PluginStorageApi;
+  workbench: WorkbenchHostApi;
+  worktable: WorktableHostApi;
+  browser: BrowserHostApi;
+  generatedApps: GeneratedAppHostApi;
+}
+
+export interface PluginExecutionContext {
+  projectId: string;
+  sessionId: string;
+  agentId: string;
+  traceId: string;
+  settings: Record<string, JsonValue>;
+  host: PluginHost;
+  /** Aborted when the user cancels this invocation, the timeout expires, or
+   * the host shuts down. Cancellation does not disable the plugin process. */
+  signal: AbortSignal;
+}
+
+export interface LegacyPluginExecutionContext {
+  projectRoot: string;
+  sessionId: string;
+  agentId: string;
+  traceId: string;
+  settings: Record<string, JsonValue>;
+}
+
+export interface OpenLabPluginTool<TContext = PluginExecutionContext> {
+  definition: Omit<ToolDefinition, 'source' | 'sourceId'>;
+  execute(input: Record<string, JsonValue>, context: TContext): Promise<ToolExecutionResult>;
+}
+
+export interface PluginWorkflowContext extends PluginExecutionContext {
+  jobId: string;
+  resume: boolean;
+  /** Stable top-level worktable task instance bound to this workflow run. */
+  worktableInstanceId?: string;
+}
+
+export interface OpenLabPluginWorkflow {
+  definition: PluginWorkflowDefinition;
+  run(input: Record<string, JsonValue>, context: PluginWorkflowContext): Promise<PluginWorkflowResult>;
+}
+
+export interface OpenLabPluginV2 {
+  apiVersion: 2;
+  tools?: Array<OpenLabPluginTool<PluginExecutionContext>>;
+  workflows?: OpenLabPluginWorkflow[];
+  context?: (input: { projectId: string; sessionId: string; agentId: string; settings: Record<string, JsonValue>; host: PluginHost }) => Promise<ContextContribution[]> | ContextContribution[];
+  agentTemplates?: AgentTemplate[];
+  dispose?: () => Promise<void> | void;
+}
+
+export interface OpenLabPluginV3 {
+  apiVersion: 3;
+  tools?: Array<OpenLabPluginTool<PluginExecutionContext>>;
+  workflows?: OpenLabPluginWorkflow[];
+  context?: (input: { projectId: string; sessionId: string; agentId: string; settings: Record<string, JsonValue>; host: PluginHost }) => Promise<ContextContribution[]> | ContextContribution[];
+  agentTemplates?: AgentTemplate[];
+  dispose?: () => Promise<void> | void;
+}
+
+export interface OpenLabPluginV1 {
+  apiVersion: 1;
+  tools?: Array<OpenLabPluginTool<LegacyPluginExecutionContext>>;
+  context?: (input: { projectRoot: string; sessionId: string; agentId: string; settings: Record<string, JsonValue> }) => Promise<ContextContribution[]> | ContextContribution[];
+  agentTemplates?: AgentTemplate[];
+  /** @deprecated Protocol v3 maps these to templates and never instantiates an Agent automatically. */
+  agentPresets?: AgentPreset[];
+  dispose?: () => Promise<void> | void;
+}
+
+export type OpenLabPlugin = OpenLabPluginV1 | OpenLabPluginV2 | OpenLabPluginV3;
+
+export function definePlugin<TPlugin extends OpenLabPlugin>(plugin: TPlugin): TPlugin {
+  if (plugin.apiVersion !== 1 && plugin.apiVersion !== 2 && plugin.apiVersion !== OPENLAB_PLUGIN_API_VERSION) {
+    throw new Error(`不支持的 OpenLab Plugin API：${String((plugin as { apiVersion?: unknown }).apiVersion)}`);
+  }
+  return plugin;
+}
