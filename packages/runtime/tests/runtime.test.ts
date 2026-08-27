@@ -57,6 +57,178 @@ async function oversizedRequestStatus(url: string, authorization: string): Promi
 }
 
 describe('OpenLab runtime', () => {
+  it('validates project Agent membership before creating a conversation and supports a different lead per conversation', async () => {
+    const root = temporaryDirectory();
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true });
+    await runtime.initialize();
+    const leadId = await createFirstAgent(runtime, 'Lead');
+    const reviewer = runtime.createAgent({ name: 'Reviewer' });
+    runtime.setProjectAgent(reviewer.id, false);
+
+    const before = await runtime.snapshot();
+    const createdEventsBefore = runtime.events.listByKind('session.created').length;
+    expect(() => runtime.createSession('invalid reviewer chat', reviewer.id)).toThrow(/未在当前项目启用/u);
+    expect((await runtime.snapshot()).sessions.map((session) => session.id)).toEqual(before.sessions.map((session) => session.id));
+    expect(runtime.events.listByKind('session.created')).toHaveLength(createdEventsBefore);
+
+    runtime.setProjectAgent(reviewer.id, true);
+    const leadChat = runtime.createSession('lead chat', leadId);
+    expect(leadChat.leadAgentId).toBe(leadId);
+    expect((await runtime.snapshot()).sessionAgentBinding).toMatchObject({ sessionId: leadChat.id, leadAgentId: leadId, memberAgentIds: [] });
+    const reviewerChat = runtime.createSession('reviewer chat', reviewer.id);
+    expect(reviewerChat.leadAgentId).toBe(reviewer.id);
+    expect((await runtime.snapshot()).sessionAgentBinding).toMatchObject({ sessionId: reviewerChat.id, leadAgentId: reviewer.id, memberAgentIds: [] });
+    await runtime.stop();
+  });
+
+  it('atomically starts a conversation, enables its Agent in the project, and rolls back a failed first message', async () => {
+    const root = temporaryDirectory();
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true });
+    await runtime.initialize();
+    await createFirstAgent(runtime, 'Lead');
+    const reviewer = runtime.createAgent({ name: 'Cross-project reviewer' });
+    runtime.setProjectAgent(reviewer.id, false);
+    const initialSessionId = (await runtime.snapshot()).activeSessionId;
+    const pushes: Array<{ type: string }> = [];
+    const unsubscribe = runtime.subscribe((message) => pushes.push(message));
+
+    const started = await runtime.startConversation({
+      leadAgentId: reviewer.id,
+      message: { text: 'atomic first message' },
+    });
+    const active = await runtime.snapshot();
+    expect(active.activeSessionId).toBe(started.session.id);
+    expect(active.sessionAgentBinding.leadAgentId).toBe(reviewer.id);
+    expect(active.timeline.some((node) => node.kind === 'user' && node.content === 'atomic first message')).toBe(true);
+    expect(active.projectAgents.find((binding) => binding.agentId === reviewer.id)?.enabled).toBe(true);
+    expect(pushes[0]).toMatchObject({ type: 'snapshot' });
+    expect(pushes.slice(0, 1).some((message) => message.type === 'sessions.changed')).toBe(false);
+
+    await waitUntil(async () => (await runtime.snapshot()).sessions.find((session) => session.id === started.session.id)?.status !== 'running');
+    runtime.switchSession(initialSessionId);
+    runtime.setProjectAgent(reviewer.id, false);
+    const beforeFailure = await runtime.snapshot();
+    await expect(runtime.startConversation({
+      leadAgentId: reviewer.id,
+      title: 'must be rolled back',
+      message: { text: 'x'.repeat(200_001) },
+    })).rejects.toThrow(/200,000/u);
+    const afterFailure = await runtime.snapshot();
+    expect(afterFailure.activeSessionId).toBe(beforeFailure.activeSessionId);
+    expect(afterFailure.sessions.some((session) => session.title === 'must be rolled back' && session.status !== 'archived')).toBe(false);
+    expect(afterFailure.projectAgents.find((binding) => binding.agentId === reviewer.id)?.enabled).toBe(false);
+
+    unsubscribe();
+    await runtime.stop();
+  });
+
+  it('runs temporary chats normally and removes their history when the user leaves', async () => {
+    const root = temporaryDirectory();
+    const home = join(root, '.runtime');
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home, demo: true });
+    await runtime.initialize();
+    await createFirstAgent(runtime);
+    const persistentSessionId = (await runtime.snapshot()).activeSessionId;
+    const temporary = runtime.createSession('临时聊天', undefined, [], true);
+    expect(temporary.temporary).toBe(true);
+    runtime.submitChat({ text: 'temporary research question' });
+    await waitUntil(async () => {
+      const current = await runtime.snapshot();
+      return current.sessions.find((session) => session.id === temporary.id)?.status !== 'running';
+    });
+    const during = await runtime.snapshot();
+    expect(during.sessions.find((session) => session.id === temporary.id)?.temporary).toBe(true);
+    expect(during.timeline.some((node) => node.kind === 'user' && node.content.includes('temporary research question'))).toBe(true);
+    expect(runtime.events.list(`session:${temporary.id}`).length).toBeGreaterThan(0);
+
+    runtime.switchSession(persistentSessionId);
+    const afterLeaving = await runtime.snapshot();
+    expect(afterLeaving.sessions.some((session) => session.id === temporary.id)).toBe(false);
+    expect(runtime.events.list(`session:${temporary.id}`)).toEqual([]);
+    await runtime.stop();
+
+    const persisted = new SqliteEventStore(join(home, 'openlab.db'));
+    expect(persisted.list(`session:${temporary.id}`)).toEqual([]);
+    expect(persisted.listByKind('session.created').some((event) => JSON.stringify(event.payload).includes(temporary.id))).toBe(false);
+    persisted.close();
+  });
+
+  it('archives every persisted conversation in a project without creating a replacement sidebar chat', async () => {
+    const root = temporaryDirectory();
+    const config = { host: '127.0.0.1' as const, port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true };
+    const runtime = new OpenLabRuntime(config);
+    await runtime.initialize();
+    const leadId = await createFirstAgent(runtime);
+    runtime.createSession('第二个项目对话', leadId);
+    const before = await runtime.snapshot();
+    const persistedIds = before.sessions.filter((item) => !item.temporary && item.status !== 'archived').map((item) => item.id);
+
+    expect(runtime.archiveProjectSessions().archivedSessionIds.sort()).toEqual([...persistedIds].sort());
+    const after = await runtime.snapshot();
+    expect(after.sessions.filter((item) => !item.temporary).every((item) => item.status === 'archived')).toBe(true);
+    expect(after.sessions.find((item) => item.id === after.activeSessionId)?.temporary).toBe(true);
+    expect(after.sessionCatalog?.filter((item) => item.projectId === after.project.id && item.status !== 'archived')).toEqual([]);
+
+    expect(runtime.renameProject('重命名后的项目').name).toBe('重命名后的项目');
+    expect((await runtime.snapshot()).project.name).toBe('重命名后的项目');
+    await runtime.stop();
+
+    const restarted = new OpenLabRuntime(config);
+    await restarted.initialize();
+    const restartedSnapshot = await restarted.snapshot();
+    expect(restartedSnapshot.sessions.find((item) => item.id === restartedSnapshot.activeSessionId)?.status).not.toBe('archived');
+    expect(persistedIds).not.toContain(restartedSnapshot.activeSessionId);
+    await restarted.stop();
+  });
+
+  it('replays the latest persisted session status after a completed turn', async () => {
+    const root = temporaryDirectory();
+    const home = join(root, '.runtime');
+    const config = { host: '127.0.0.1' as const, port: 0, authToken: 'token', projectRoot: root, home, demo: true };
+    const first = new OpenLabRuntime(config);
+    await first.initialize();
+    await createFirstAgent(first);
+    first.submitChat({ text: 'complete before restart' });
+    await waitUntil(async () => {
+      const snapshot = await first.snapshot();
+      return snapshot.sessions.find((session) => session.id === snapshot.activeSessionId)?.status === 'idle';
+    });
+    const completed = await first.snapshot();
+    const sessionId = completed.activeSessionId;
+    expect(completed.sessions.find((session) => session.id === sessionId)?.status).toBe('idle');
+    await first.stop();
+
+    const restored = new OpenLabRuntime(config);
+    await restored.initialize();
+    const afterRestart = await restored.snapshot();
+    expect(afterRestart.activeSessionId).toBe(sessionId);
+    expect(afterRestart.sessions.find((session) => session.id === sessionId)?.status).toBe('idle');
+    expect(afterRestart.timeline.some((node) => node.title === '已恢复会话')).toBe(false);
+    await restored.stop();
+  });
+
+  it('exposes a stable session catalog across project runtimes sharing one local database', async () => {
+    const home = temporaryDirectory();
+    const firstRoot = temporaryDirectory();
+    const secondRoot = temporaryDirectory();
+    const first = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token-a', projectRoot: firstRoot, home, demo: true });
+    await first.initialize();
+    const firstSnapshot = await first.snapshot();
+    const firstSessionId = firstSnapshot.activeSessionId;
+
+    const second = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token-b', projectRoot: secondRoot, home, demo: true });
+    await second.initialize();
+    const secondSnapshot = await second.snapshot();
+    const secondSessionId = secondSnapshot.activeSessionId;
+
+    expect(secondSnapshot.sessions.map((session) => session.id)).toEqual([secondSessionId]);
+    expect(secondSnapshot.sessionCatalog?.map((session) => session.id)).toEqual(expect.arrayContaining([firstSessionId, secondSessionId]));
+    expect((await first.snapshot()).sessionCatalog?.map((session) => session.id)).toEqual(expect.arrayContaining([firstSessionId, secondSessionId]));
+
+    await second.stop();
+    await first.stop();
+  });
+
   it('enforces read-only mode as a hard model capability boundary', async () => {
     const visibleToolSets: string[][] = [];
     const provider: ModelProvider = {
@@ -202,6 +374,32 @@ describe('OpenLab runtime', () => {
     await restored.stop();
   });
 
+  it('keeps each project active session isolated while switching roots', async () => {
+    const base = temporaryDirectory();
+    const home = join(base, '.runtime');
+    const projectA = join(base, 'project-a');
+    const projectB = join(base, 'project-b');
+    const common = { host: '127.0.0.1' as const, port: 0, authToken: 'token', home, demo: true };
+
+    const firstA = new OpenLabRuntime({ ...common, projectRoot: projectA });
+    await firstA.initialize();
+    const initialA = await firstA.snapshot();
+    await firstA.stop();
+
+    const firstB = new OpenLabRuntime({ ...common, projectRoot: projectB });
+    await firstB.initialize();
+    const initialB = await firstB.snapshot();
+    expect(initialB.project.id).not.toBe(initialA.project.id);
+    await firstB.stop();
+
+    const restoredA = new OpenLabRuntime({ ...common, projectRoot: projectA });
+    await restoredA.initialize();
+    const afterSwitch = await restoredA.snapshot();
+    expect(afterSwitch.activeSessionId).toBe(initialA.activeSessionId);
+    expect(afterSwitch.sessions.map((session) => session.id)).toEqual(initialA.sessions.map((session) => session.id));
+    await restoredA.stop();
+  });
+
   it('creates one primary Agent and persists its editable Hana-style identity globally', async () => {
     const root = temporaryDirectory();
     const config = { host: '127.0.0.1' as const, port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true };
@@ -254,6 +452,45 @@ describe('OpenLab runtime', () => {
     await restored.stop();
   });
 
+  it('persists the user profile globally and projects it into assistant context', async () => {
+    const root = temporaryDirectory();
+    const config = { host: '127.0.0.1' as const, port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true };
+    const runtime = new OpenLabRuntime(config);
+    await runtime.initialize();
+    expect((await runtime.snapshot()).userProfile).toMatchObject({ name: '用户', profile: '' });
+
+    const pushes: unknown[] = [];
+    const unsubscribe = runtime.subscribe((message) => pushes.push(message));
+    expect(runtime.configureUserProfile({ name: '  小王  ', profile: '偏好先看结论和证据，使用中文回答。' })).toMatchObject({
+      name: '小王',
+      profile: '偏好先看结论和证据，使用中文回答。',
+    });
+    expect(pushes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'user-profile.changed', profile: expect.objectContaining({ name: '小王' }) }),
+    ]));
+    expect(runtime.events.list('app:user-profile').map((event) => event.kind)).toContain('settings.user_profile_changed');
+    expect(() => runtime.configureUserProfile({ name: '', profile: '' })).toThrow(/1–32/u);
+    expect(() => runtime.configureUserProfile({ name: '小王', profile: 'x'.repeat(12_001) })).toThrow(/12,000/u);
+
+    await createFirstAgent(runtime);
+    runtime.submitChat({ text: '验证用户档案上下文' });
+    await waitUntil(async () => {
+      const current = await runtime.snapshot();
+      return current.sessions.find((session) => session.id === current.activeSessionId)?.status !== 'running';
+    });
+    const snapshot = await runtime.snapshot();
+    const modelRequest = runtime.events.list(`session:${snapshot.activeSessionId}`).find((event) => event.kind === 'model.requested');
+    expect(JSON.stringify(modelRequest?.payload)).toContain('称呼：小王');
+    expect(JSON.stringify(modelRequest?.payload)).toContain('偏好先看结论和证据');
+    unsubscribe();
+    await runtime.stop();
+
+    const restored = new OpenLabRuntime(config);
+    await restored.initialize();
+    expect((await restored.snapshot()).userProfile).toMatchObject({ name: '小王', profile: '偏好先看结论和证据，使用中文回答。' });
+    await restored.stop();
+  });
+
   it('records model-visible context before completing an offline turn', async () => {
     const root = temporaryDirectory();
     const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true });
@@ -268,6 +505,94 @@ describe('OpenLab runtime', () => {
     expect(eventKinds.indexOf('context.compiled')).toBeLessThan(eventKinds.indexOf('model.requested') + 1);
     expect(eventKinds.indexOf('model.requested')).toBeLessThan(eventKinds.indexOf('model.completed'));
     expect(eventKinds).toContain('turn.completed');
+    await runtime.stop();
+  });
+
+  it('uses the active interface language for visible reasoning summaries and preserves it when regenerating', async () => {
+    const requests: ModelRequest[] = [];
+    const provider: ModelProvider = {
+      id: 'fixture',
+      async listModels() { return [{ id: 'fixture-model', label: 'Fixture', contextWindow: 128_000, supportsThinking: true, supportsTools: true, supportsVision: false }]; },
+      async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
+        requests.push(structuredClone(request));
+        yield { type: 'reasoning_delta', text: '已按界面语言生成摘要。' };
+        yield { type: 'text_delta', text: '完成' };
+        yield { type: 'done', finishReason: 'stop' };
+      },
+    };
+    const root = temporaryDirectory();
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: false, modelProvider: provider });
+    await runtime.initialize();
+    await createFirstAgent(runtime);
+    expect(() => runtime.submitChat({ text: 'invalid locale', interfaceLocale: '../zh-CN' })).toThrow(/界面语言标识无效/u);
+
+    const { turnId } = runtime.submitChat({ text: 'language policy probe', model: 'fixture-model', interfaceLocale: 'zh-CN' });
+    await waitUntil(async () => {
+      const snapshot = await runtime.snapshot();
+      return snapshot.sessions.find((session) => session.id === snapshot.activeSessionId)?.status !== 'running';
+    });
+    const firstEvents = runtime.events.list(`session:${(await runtime.snapshot()).activeSessionId}`);
+    const started = firstEvents.find((event) => event.kind === 'turn.started');
+    expect(started?.payload).toMatchObject({ interfaceLocale: 'zh-CN' });
+    const firstChatRequest = requests.find((request) => request.messages.some((message) => message.role === 'user' && String(message.content).includes('language policy probe')));
+    const firstSystemContext = firstChatRequest?.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n') ?? '';
+    expect(firstSystemContext).toContain('BCP 47 tag "zh-CN"');
+    expect(firstSystemContext).toContain('user-visible reasoning summary');
+    expect(firstSystemContext).toContain('Never expose hidden chain-of-thought');
+
+    runtime.regenerateTurn(turnId);
+    await waitUntil(async () => {
+      const snapshot = await runtime.snapshot();
+      return snapshot.sessions.find((session) => session.id === snapshot.activeSessionId)?.status !== 'running';
+    });
+    const regenerated = requests.filter((request) => request.messages.some((message) => message.role === 'user' && String(message.content).includes('language policy probe')));
+    expect(regenerated).toHaveLength(2);
+    expect(regenerated[1]?.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n')).toContain('BCP 47 tag "zh-CN"');
+    await runtime.stop();
+  });
+
+  it('finishes the user turn before optional title refinement and allows the next message immediately', async () => {
+    let titleStarted = false;
+    let titleAborted = false;
+    const provider: ModelProvider = {
+      id: 'deepseek',
+      async listModels() { return [{ id: 'fixture-model', label: 'Fixture', contextWindow: 128_000, supportsThinking: true, supportsTools: true, supportsVision: false }]; },
+      async *stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+        const system = request.messages.filter((message) => message.role === 'system').map((message) => String(message.content)).join('\n');
+        if (system.includes('生成简洁中文标题')) {
+          titleStarted = true;
+          await new Promise<void>((_resolve, reject) => {
+            const abort = () => {
+              titleAborted = true;
+              reject(signal.reason ?? new Error('title refinement aborted'));
+            };
+            if (signal.aborted) abort();
+            else signal.addEventListener('abort', abort, { once: true });
+          });
+          return;
+        }
+        yield { type: 'text_delta', text: '回答已经完成' };
+        yield { type: 'done', finishReason: 'stop' };
+      },
+    };
+    const root = temporaryDirectory();
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: false, modelProvider: provider });
+    await runtime.initialize();
+    await createFirstAgent(runtime);
+    runtime.submitChat({ text: '第一轮用于验证按钮恢复', model: 'fixture-model' });
+    await waitUntil(async () => titleStarted, 2_000);
+    const afterAnswer = await runtime.snapshot();
+    expect(afterAnswer.timeline).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'assistant', content: '回答已经完成', status: 'completed' })]));
+    expect(afterAnswer.sessions.find((session) => session.id === afterAnswer.activeSessionId)).toMatchObject({ status: 'idle', title: '第一轮用于验证按钮恢复' });
+    expect(afterAnswer.agentRuns.find((run) => run.role === 'lead')?.status).toBe('idle');
+
+    expect(() => runtime.submitChat({ text: '第二轮无需等待后台标题', model: 'fixture-model' })).not.toThrow();
+    await waitUntil(async () => {
+      const snapshot = await runtime.snapshot();
+      return snapshot.sessions.find((session) => session.id === snapshot.activeSessionId)?.status !== 'running';
+    });
+    expect(titleAborted).toBe(true);
+    expect((await runtime.snapshot()).timeline.filter((node) => node.kind === 'assistant' && node.content === '回答已经完成')).toHaveLength(2);
     await runtime.stop();
   });
 
@@ -296,10 +621,16 @@ describe('OpenLab runtime', () => {
     await waitUntil(async () => runtime.events.list(`session:${(await runtime.snapshot()).activeSessionId}`).some((event) => event.kind === 'model.chunk_batch'), 2_000);
     const during = await runtime.snapshot();
     expect(during.sessions.find((session) => session.id === during.activeSessionId)?.status).toBe('running');
+    expect(during.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'reasoning', status: 'streaming', content: '', metadata: expect.objectContaining({ thinking: 'enabled' }) }),
+    ]));
     const batch = runtime.events.list(`session:${during.activeSessionId}`).find((event) => event.kind === 'model.chunk_batch');
     expect(JSON.stringify(batch?.payload)).toContain('partial-before-finish');
     release();
     await waitUntil(async () => (await runtime.snapshot()).sessions.find((session) => session.id === during.activeSessionId)?.status !== 'running');
+    expect((await runtime.snapshot()).timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'reasoning', status: 'completed', content: '' }),
+    ]));
     await runtime.stop();
   });
 
@@ -368,6 +699,7 @@ describe('OpenLab runtime', () => {
     const fork = runtime.forkSession(source);
     const snapshot = await runtime.snapshot();
     expect(snapshot.activeSessionId).toBe(fork.id);
+    expect(fork.leadAgentId).toBe(snapshot.sessionAgentBinding.leadAgentId);
     expect(snapshot.timeline.some((node) => node.kind === 'user' && node.content.includes('fork this'))).toBe(true);
     expect(snapshot.agentRuns.filter((agent) => agent.role === 'member')).toHaveLength(0);
     const origin = runtime.events.list(`session:${fork.id}`).find((event) => event.kind === 'session.fork_origin');
@@ -392,8 +724,78 @@ describe('OpenLab runtime', () => {
     const snapshot = await runtime.snapshot();
     const compiled = runtime.events.list(`session:${snapshot.activeSessionId}`).find((event) => event.kind === 'context.compiled');
     expect(JSON.stringify(compiled?.payload)).toContain('untrusted-research-data');
+    expect(snapshot.conversationFiles).toEqual([expect.objectContaining({ name: 'attachment.txt', origin: 'upload', ref: { rootId: 'project', path: 'attachment.txt' } })]);
     writeFileSync(attachmentPath, `${content} changed`, 'utf8');
     expect(() => runtime.submitChat({ text: 'reuse', attachments: [attachment] })).toThrow(/发生变化/u);
+    await runtime.stop();
+  });
+
+  it('sends hash-verified image attachments to vision models without persisting base64 and keeps them in later context', async () => {
+    const root = temporaryDirectory();
+    const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl7cH8AAAAASUVORK5CYII=', 'base64');
+    const imagePath = join(root, 'probe.png');
+    writeFileSync(imagePath, imageBytes);
+    const attachment = {
+      id: 'vision-attachment', name: 'probe.png', relativePath: 'probe.png',
+      sha256: createHash('sha256').update(imageBytes).digest('hex'), size: imageBytes.length, mediaType: 'image/png',
+    };
+    const requests: ModelRequest[] = [];
+    const provider: ModelProvider = {
+      id: 'fixture',
+      async listModels() { return [{ id: 'fixture-vision', label: 'Vision', contextWindow: 128_000, supportsThinking: true, supportsTools: true, supportsVision: true }]; },
+      async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
+        requests.push(structuredClone(request));
+        yield { type: 'text_delta', text: 'vision-complete' };
+        yield { type: 'done', finishReason: 'stop' };
+      },
+    };
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: false, modelProvider: provider });
+    await runtime.initialize();
+    await createFirstAgent(runtime);
+    runtime.submitChat({ text: 'inspect image', model: 'fixture-vision', attachments: [attachment] });
+    await waitUntil(async () => {
+      const state = await runtime.snapshot();
+      return state.sessions.find((session) => session.id === state.activeSessionId)?.status !== 'running';
+    });
+    runtime.submitChat({ text: 'refer to the same image again', model: 'fixture-vision' });
+    await waitUntil(async () => {
+      const state = await runtime.snapshot();
+      return state.sessions.find((session) => session.id === state.activeSessionId)?.status !== 'running';
+    });
+
+    const visualRequests = requests.filter((request) => request.messages.some((message) => Array.isArray(message.content)
+      && message.content.some((part) => part.type === 'image_url')));
+    expect(visualRequests.length).toBeGreaterThanOrEqual(2);
+    expect(visualRequests[0]?.messages.some((message) => Array.isArray(message.content)
+      && message.content.some((part) => part.type === 'image_url' && part.imageUrl.startsWith('data:image/png;base64,')))).toBe(true);
+    const events = runtime.events.list(`session:${(await runtime.snapshot()).activeSessionId}`);
+    expect(JSON.stringify(events.filter((event) => event.kind === 'model.requested'))).not.toContain('iVBORw0KGgo');
+    expect(JSON.stringify(events.filter((event) => event.kind === 'message.recorded'))).toContain('vision-attachment');
+    await runtime.stop();
+  });
+
+  it('rejects a new image attachment before starting a turn when the selected model has no vision support', async () => {
+    const root = temporaryDirectory();
+    const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl7cH8AAAAASUVORK5CYII=', 'base64');
+    writeFileSync(join(root, 'probe.png'), imageBytes);
+    const provider: ModelProvider = {
+      id: 'fixture',
+      async listModels() { return [{ id: 'fixture-text', label: 'Text only', contextWindow: 128_000, supportsThinking: true, supportsTools: true, supportsVision: false }]; },
+      async *stream(): AsyncIterable<ModelEvent> { yield { type: 'done', finishReason: 'stop' }; },
+    };
+    const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: false, modelProvider: provider });
+    await runtime.initialize();
+    await createFirstAgent(runtime);
+    expect(() => runtime.submitChat({
+      text: 'inspect image',
+      model: 'fixture-text',
+      attachments: [{
+        id: 'vision-attachment', name: 'probe.png', relativePath: 'probe.png',
+        sha256: createHash('sha256').update(imageBytes).digest('hex'), size: imageBytes.length, mediaType: 'image/png',
+      }],
+    })).toThrow(/不支持视觉输入/u);
+    const state = await runtime.snapshot();
+    expect(state.timeline.some((node) => node.kind === 'user' && node.content === 'inspect image')).toBe(false);
     await runtime.stop();
   });
 
@@ -609,6 +1011,9 @@ describe('OpenLab runtime', () => {
       method: 'POST', headers: { Authorization: 'Bearer secret-token' },
     });
     expect(activateRestored.status).toBe(200);
+    const activatedSnapshot = await activateRestored.json() as { activeSessionId: string; sessions: Array<{ id: string; status: string }> };
+    expect(activatedSnapshot.activeSessionId).toBe(archivedId);
+    expect(activatedSnapshot.sessions.find((session) => session.id === archivedId)?.status).toBe('idle');
 
     await expect(oversizedRequestStatus(`${server.url}/api/chat`, 'Bearer secret-token')).resolves.toBe(413);
 

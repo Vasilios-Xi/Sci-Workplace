@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "pnpm --filter @openlab/runtime build && pnpm build && wait-on http://127.0.0.1:5173 && cross-env OPENLAB_RENDERER_URL=http://127.0.0.1:5173 electron dist/main.js",
     "start": "electron dist/main.js",
-    "package:win": "pnpm --filter @openlab/renderer build && pnpm --filter @openlab/runtime build && pnpm build && electron-builder --win nsis",
+    "package:win": "pnpm --filter @openlab/renderer build && pnpm --filter @openlab/runtime build && pnpm --filter @openlab/reader-runtime verify && pnpm build && electron-builder --win nsis",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
@@ -29,8 +29,10 @@
     "appId": "io.sciworkplace.desktop",
     "productName": "Sci Workplace",
     "asar": true,
+    "npmRebuild": false,
     "asarUnpack": [
       "node_modules/@openlab/runtime/**",
+      "node_modules/node-pty/**",
       "node_modules/pnpm/**",
       "node_modules/typescript/**"
     ],

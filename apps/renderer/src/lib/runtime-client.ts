@@ -2,6 +2,12 @@ import { t, tf } from "./../i18n/zh-CN.js";
 import type { BootstrapSnapshot, ServerPushMessage } from '@openlab/protocol';
 export class RuntimeClient {
     #connection: OpenLabConnection | undefined;
+    replaceConnection(connection: OpenLabConnection): void {
+        this.#connection = connection;
+    }
+    resetConnection(): void {
+        this.#connection = undefined;
+    }
     async connect(): Promise<OpenLabConnection> {
         if (this.#connection)
             return this.#connection;
@@ -94,34 +100,44 @@ export class RuntimeClient {
                 url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
                 url.pathname = '/ws';
                 url.searchParams.set('token', connection.token);
-                socket = new WebSocket(url);
+                const candidate = new WebSocket(url);
+                socket = candidate;
+                candidate.addEventListener('open', () => {
+                    if (socket === candidate)
+                        onConnection(true);
+                });
+                candidate.addEventListener('message', (event) => {
+                    if (socket !== candidate)
+                        return;
+                    try {
+                        onMessage(JSON.parse(String(event.data)) as ServerPushMessage);
+                    }
+                    catch { /* ignore malformed local frames */ }
+                });
+                candidate.addEventListener('close', () => {
+                    if (socket !== candidate)
+                        return;
+                    socket = undefined;
+                    onConnection(false);
+                    this.#connection = undefined;
+                    scheduleReconnect();
+                });
+                candidate.addEventListener('error', () => candidate.close());
             }
             catch {
                 onConnection(false);
                 this.#connection = undefined;
                 scheduleReconnect();
-                return;
             }
-            socket.addEventListener('open', () => onConnection(true));
-            socket.addEventListener('message', (event) => {
-                try {
-                    onMessage(JSON.parse(String(event.data)) as ServerPushMessage);
-                }
-                catch { /* ignore malformed local frames */ }
-            });
-            socket.addEventListener('close', () => {
-                onConnection(false);
-                this.#connection = undefined;
-                scheduleReconnect();
-            });
-            socket.addEventListener('error', () => socket?.close());
         };
         void open();
         return () => {
             closedByClient = true;
             if (retry !== undefined)
                 window.clearTimeout(retry);
-            socket?.close();
+            const activeSocket = socket;
+            socket = undefined;
+            activeSocket?.close();
         };
     }
 }

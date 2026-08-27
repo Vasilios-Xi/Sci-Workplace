@@ -47,6 +47,7 @@ function rowToEvent(row: EventRow): RuntimeEventEnvelope {
 
 export class SqliteEventStore {
   readonly #database: DatabaseSync;
+  readonly #temporaryStreams = new Map<string, RuntimeEventEnvelope[]>();
   #closed = false;
 
   constructor(path: string) {
@@ -153,6 +154,24 @@ export class SqliteEventStore {
   }
 
   append<TPayload extends JsonValue>(input: AppendEventInput<TPayload>): RuntimeEventEnvelope<TPayload> {
+    const temporary = this.#temporaryStreams.get(input.streamId);
+    if (temporary) {
+      const event: RuntimeEventEnvelope<TPayload> = {
+        id: randomUUID(),
+        streamId: input.streamId,
+        sequence: temporary.length + 1,
+        kind: input.kind,
+        schemaVersion: 1,
+        timestamp: input.timestamp ?? new Date().toISOString(),
+        actor: input.actor,
+        traceId: input.traceId ?? randomUUID(),
+        provenanceRefs: input.provenanceRefs ?? [],
+        payload: input.payload,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+      };
+      temporary.push(event);
+      return event;
+    }
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const row = this.#database.prepare(
@@ -198,6 +217,8 @@ export class SqliteEventStore {
   }
 
   list(streamId: string, afterSequence = 0): RuntimeEventEnvelope[] {
+    const temporary = this.#temporaryStreams.get(streamId);
+    if (temporary) return temporary.filter((event) => event.sequence > afterSequence).map((event) => structuredClone(event));
     const rows = this.#database.prepare(`
       SELECT * FROM runtime_events
       WHERE stream_id = ? AND sequence > ?
@@ -210,21 +231,49 @@ export class SqliteEventStore {
     const rows = this.#database.prepare(`
       SELECT * FROM runtime_events WHERE kind = ? ORDER BY timestamp DESC LIMIT ?
     `).all(kind, limit) as unknown as EventRow[];
-    return rows.map(rowToEvent).reverse();
+    const persisted = rows.map(rowToEvent);
+    const temporary = [...this.#temporaryStreams.values()].flat().filter((event) => event.kind === kind);
+    return [...persisted, ...temporary]
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+      .slice(0, limit)
+      .map((event) => structuredClone(event));
   }
 
   listAll(limit = 10_000): RuntimeEventEnvelope[] {
     const rows = this.#database.prepare(`
       SELECT * FROM runtime_events ORDER BY timestamp DESC, stream_id DESC, sequence DESC LIMIT ?
     `).all(limit) as unknown as EventRow[];
-    return rows.reverse().map(rowToEvent);
+    const persisted = rows.map(rowToEvent);
+    const temporary = [...this.#temporaryStreams.values()].flat();
+    return [...persisted, ...temporary]
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp) || right.streamId.localeCompare(left.streamId) || right.sequence - left.sequence)
+      .slice(0, limit)
+      .map((event) => structuredClone(event));
   }
 
   listStreams(): Array<{ streamId: string; lastSequence: number; updatedAt: string }> {
-    return this.#database.prepare(`
+    const persisted = this.#database.prepare(`
       SELECT stream_id AS streamId, MAX(sequence) AS lastSequence, MAX(timestamp) AS updatedAt
       FROM runtime_events GROUP BY stream_id ORDER BY updatedAt DESC
     `).all() as unknown as Array<{ streamId: string; lastSequence: number; updatedAt: string }>;
+    const temporary = [...this.#temporaryStreams.entries()].flatMap(([streamId, events]) => {
+      const last = events.at(-1);
+      return last ? [{ streamId, lastSequence: last.sequence, updatedAt: last.timestamp }] : [];
+    });
+    return [...persisted, ...temporary].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  /** Keeps every event for this stream in memory only. Used by temporary chats. */
+  markTemporaryStream(streamId: string): void {
+    if (!this.#temporaryStreams.has(streamId)) this.#temporaryStreams.set(streamId, []);
+  }
+
+  discardTemporaryStream(streamId: string): void {
+    this.#temporaryStreams.delete(streamId);
+  }
+
+  isTemporaryStream(streamId: string): boolean {
+    return this.#temporaryStreams.has(streamId);
   }
 
   setValue(key: string, value: JsonValue): void {
@@ -331,6 +380,7 @@ export class SqliteEventStore {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#temporaryStreams.clear();
     this.#database.close();
   }
 }

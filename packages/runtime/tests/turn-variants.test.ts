@@ -69,7 +69,8 @@ describe('turn variants', () => {
     const locked = (await runtime.snapshot()).turnVariants[0]!;
     expect(locked).toMatchObject({ activeVariantId: firstVariantId, locked: true });
     expect(() => runtime.activateTurnVariant(first.turnId, regeneration.variantId)).toThrow(/锁定/u);
-    const sourceSessionId = (await runtime.snapshot()).activeSessionId;
+    const sourceSnapshot = await runtime.snapshot();
+    const sourceSessionId = sourceSnapshot.activeSessionId;
     const boundaryNodeId = locked.variants.find((variant) => variant.id === firstVariantId)?.assistantNodeIds.at(-1);
     expect(boundaryNodeId).toBeTruthy();
     runtime.forkSession(sourceSessionId, undefined, boundaryNodeId);
@@ -77,6 +78,29 @@ describe('turn variants', () => {
     expect(forked.timeline.some((node) => node.kind === 'user' && node.content === 'follow-up')).toBe(false);
     expect(forked.turnVariants[0]).toMatchObject({ activeVariantId: firstVariantId });
     expect(forked.turnVariants[0]?.variants.find((variant) => variant.id === firstVariantId)).toMatchObject({ status: 'completed' });
+
+    runtime.switchSession(sourceSessionId);
+    const followUpNode = sourceSnapshot.timeline.find((node) => node.kind === 'user' && node.content === 'follow-up');
+    expect(followUpNode).toBeTruthy();
+    runtime.forkSession(sourceSessionId, undefined, undefined, followUpNode!.id);
+    const editFork = await runtime.snapshot();
+    expect(editFork.timeline.some((node) => node.kind === 'user' && node.content === 'first question')).toBe(true);
+    expect(editFork.timeline.some((node) => node.kind === 'user' && node.content === 'follow-up')).toBe(false);
+    runtime.submitChat({ text: 'edited follow-up', model: 'fixture-model' });
+    await waitForIdle(runtime);
+    const editedRequest = requests.at(-1)!;
+    expect(editedRequest.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'user', content: 'first question' }),
+      expect.objectContaining({ role: 'assistant', content: 'answer-1' }),
+      expect.objectContaining({ role: 'user', content: 'edited follow-up' }),
+    ]));
+    expect(editedRequest.messages).not.toEqual(expect.arrayContaining([expect.objectContaining({ role: 'user', content: 'follow-up' })]));
+
+    runtime.switchSession(sourceSessionId);
+    const firstUserNode = sourceSnapshot.timeline.find((node) => node.kind === 'user' && node.content === 'first question');
+    expect(firstUserNode).toBeTruthy();
+    runtime.forkSession(sourceSessionId, undefined, undefined, firstUserNode!.id);
+    expect((await runtime.snapshot()).timeline).toEqual([]);
     runtime.switchSession(sourceSessionId);
     await runtime.stop();
 

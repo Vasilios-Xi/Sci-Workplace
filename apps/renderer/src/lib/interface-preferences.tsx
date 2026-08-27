@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   defaultInterfacePreferences,
+  READING_BODY_BASE_SIZE,
   mergeInterfacePreferences,
   normalizeInterfacePreferences,
   type ContentWidth,
@@ -54,7 +55,7 @@ export function applyInterfacePreferences(preferences: InterfacePreferences): vo
   root.style.colorScheme = ['cyan-night', 'ming', 'cyan-night-contrast'].includes(resolvedTheme) ? 'dark' : 'light';
   root.style.setProperty('--reading-font-family', readingFont);
   root.style.setProperty('--markdown-font-family', markdownFont);
-  root.style.setProperty('--reading-body-size', `${16 + delta}px`);
+  root.style.setProperty('--reading-body-size', `${READING_BODY_BASE_SIZE + delta}px`);
   root.style.setProperty('--markdown-body-size', `${preferences.markdown.bodySize + delta}px`);
   root.style.setProperty('--markdown-h1-size', `${preferences.markdown.heading1Size + delta}px`);
   root.style.setProperty('--markdown-h2-size', `${preferences.markdown.heading2Size + delta}px`);

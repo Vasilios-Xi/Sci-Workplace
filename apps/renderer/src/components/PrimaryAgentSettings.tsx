@@ -4,6 +4,7 @@ import type { AgentCardExport, AgentDefinition, AgentDefinitionUpdate, AgentMemo
 import { agentV3ZhCN as copy } from '../i18n/zh-CN.js';
 import { AgentAvatar } from './AgentAvatar.js';
 import { confirmInApp } from './AppDialog.js';
+import { ModelPicker } from './ModelPicker.js';
 
 type EditorSection = 'profile' | 'memory' | 'experience' | 'tools';
 type MemoryView = 'pinned' | 'current' | 'all';
@@ -76,7 +77,6 @@ function ProfileEditor({ agent, snapshot, onSave, onArchive, onExport }: { agent
   const [draft, setDraft] = useState(agent);
   const [saved, setSaved] = useState(false);
   const [avatarError, setAvatarError] = useState('');
-  const modelOptions = snapshot.models.length ? snapshot.models : [{ id: agent.model, label: agent.model, contextWindow: 0, supportsThinking: true, supportsTools: true, supportsVision: false }];
   useEffect(() => { setDraft(agent); setAvatarError(''); }, [agent]);
   const save = async () => {
     await onSave(agent.id, { name: draft.name, avatar: draft.avatar, identity: draft.identity, instructions: draft.instructions, model: draft.model, reasoningEffort: draft.reasoningEffort });
@@ -96,7 +96,7 @@ function ProfileEditor({ agent, snapshot, onSave, onArchive, onExport }: { agent
     <div className="agent-profile-hero"><AgentAvatar avatar={draft.avatar} size="large"/><div><strong>{draft.name}</strong><span>{copy.agents.persistentRole}</span></div><div className="agent-profile-actions"><button title={copy.agents.exportCard} onClick={() => void download()}><Download size={14}/></button><button title={copy.agents.archive} onClick={() => void onArchive(agent.id)}><Archive size={14}/></button></div></div>
     <div className="agent-avatar-choice">{(['sage', 'ocean', 'amber'] as const).map((avatar) => <button key={avatar} title={copy.agents.presetAvatar} className={draft.avatar === avatar ? 'is-active' : ''} onClick={() => { setDraft({ ...draft, avatar }); setAvatarError(''); }}><AgentAvatar avatar={avatar} size="small"/></button>)}<label className="agent-avatar-upload" title={copy.agents.uploadAvatar}><Upload size={13}/><span>{copy.agents.uploadAvatar}</span><input data-testid="agent-avatar-upload" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; void uploadAvatar(file); }}/></label>{avatarError && <small className="agent-avatar-error" role="alert">{avatarError}</small>}</div>
     <label><span>{copy.agents.name}</span><input value={draft.name} maxLength={32} onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label>
-    <div className="agent-profile-grid"><label><span>{copy.agents.model}</span><select value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>{modelOptions.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select></label><label><span>{copy.agents.reasoning}</span><select value={draft.reasoningEffort} onChange={(event) => setDraft({ ...draft, reasoningEffort: event.target.value as ReasoningEffort })}><option value="none">{copy.agents.reasoningOptions.none}</option><option value="medium">{copy.agents.reasoningOptions.medium}</option><option value="high">{copy.agents.reasoningOptions.high}</option><option value="max">{copy.agents.reasoningOptions.max}</option></select></label></div>
+    <div className="agent-profile-grid"><div className="agent-model-field"><span>{copy.agents.model}</span><ModelPicker models={snapshot.models} value={draft.model} label={copy.agents.model} variant="field" testId="agent-model-picker" menuTestId="agent-model-picker-menu" onChange={(model) => setDraft({ ...draft, model })}/></div><label><span>{copy.agents.reasoning}</span><select value={draft.reasoningEffort} onChange={(event) => setDraft({ ...draft, reasoningEffort: event.target.value as ReasoningEffort })}><option value="none">{copy.agents.reasoningOptions.none}</option><option value="medium">{copy.agents.reasoningOptions.medium}</option><option value="high">{copy.agents.reasoningOptions.high}</option><option value="max">{copy.agents.reasoningOptions.max}</option></select></label></div>
     <label><span>{copy.agents.identity}</span><textarea data-testid="primary-agent-identity" rows={5} value={draft.identity} onChange={(event) => setDraft({ ...draft, identity: event.target.value })}/></label>
     <label><span>{copy.agents.instructions}</span><textarea data-testid="primary-agent-instructions" rows={9} value={draft.instructions} onChange={(event) => setDraft({ ...draft, instructions: event.target.value })}/></label>
     <footer><span>{copy.agents.snapshotHint}</span><button data-testid="primary-agent-settings-save" className="button primary" onClick={() => void save()}>{saved ? <><Check size={14}/>{copy.agents.saved}</> : copy.agents.save}</button></footer>

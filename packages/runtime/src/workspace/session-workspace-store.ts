@@ -18,13 +18,13 @@ import type {
   ConversationFileOrigin,
   ChatAttachmentRef,
   EventActor,
-  PermissionMode,
   SessionWorkspace,
   WorkspaceEntry,
   WorkspacePathRef,
   WorkspacePreview,
   WorkspaceRootSummary,
   WorkspaceSearchResult,
+  WorkspaceAccessMode,
 } from '@openlab/protocol';
 import type { SqliteEventStore } from '../events/event-store.js';
 import { PathGuard } from '../security/path-guard.js';
@@ -36,6 +36,7 @@ const MAX_SEARCH_RESULTS = 500;
 const MAX_OPERATION_ENTRIES = 10_000;
 const MAX_OPERATION_BYTES = 1024 * 1024 * 1024;
 const MAX_PREVIEW_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_RICH_PREVIEW_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_NOTE_CHARACTERS = 20_000;
 const HIDDEN_NAMES = new Set(['.openlab', '.git', 'node_modules', 'dist', 'coverage', '.next', 'release']);
 
@@ -70,6 +71,7 @@ export type WorkspaceFileOperation =
 interface SessionWorkspaceStoreOptions {
   projectId: string;
   projectRoot: string;
+  projectRoots?: string[];
   projectName: string;
   sessionId: string;
   model: string;
@@ -83,7 +85,8 @@ function mediaType(path: string): string | undefined {
     '.json': 'application/json', '.jsonl': 'application/jsonl', '.yaml': 'application/yaml', '.yml': 'application/yaml',
     '.xml': 'application/xml', '.tex': 'application/x-tex', '.log': 'text/plain', '.js': 'text/javascript', '.mjs': 'text/javascript',
     '.cjs': 'text/javascript', '.ts': 'text/typescript', '.tsx': 'text/tsx', '.jsx': 'text/jsx', '.css': 'text/css', '.html': 'text/html',
-    '.pdf': 'application/pdf', '.zip': 'application/zip', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.doc': 'application/msword', '.zip': 'application/zip', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
   } as Record<string, string>)[extname(path).toLocaleLowerCase()];
 }
@@ -142,6 +145,10 @@ function cloneSummary(root: InternalRoot): WorkspaceRootSummary {
   return structuredClone(summary);
 }
 
+function boundProjectRootId(path: string): string {
+  return `project-${createHash('sha256').update(resolve(path).toLocaleLowerCase()).digest('hex').slice(0, 16)}`;
+}
+
 export class SessionWorkspaceStore {
   readonly #projectId: string;
   readonly #projectRoot: string;
@@ -165,18 +172,20 @@ export class SessionWorkspaceStore {
     mkdirSync(this.#snapshotRoot, { recursive: true });
     this.#roots.set(PROJECT_ROOT_ID, {
       id: PROJECT_ROOT_ID,
-      name: options.projectName,
+      name: basename(this.#projectRoot) || options.projectName,
       displayPath: this.#projectRoot,
       kind: 'project',
       access: 'ask',
       status: 'online',
       absolutePath: this.#projectRoot,
     });
+    this.replaceProjectRoots(options.projectRoots ?? []);
     this.replay();
     this.refreshRootStatuses();
   }
 
   get streamId(): string { return `session:${this.#sessionId}`; }
+  get journalStreamId(): string { return `project:${this.#projectId}`; }
 
   snapshot(): SessionWorkspace {
     this.refreshRootStatuses();
@@ -208,7 +217,16 @@ export class SessionWorkspaceStore {
     return { id, name, kind, access, status };
   }
 
-  authorizeRoot(absolutePath: string, access: PermissionMode, actor: EventActor): WorkspaceRootSummary {
+  rootsForModel(): Array<Pick<WorkspaceRootSummary, 'id' | 'name' | 'kind' | 'access' | 'status'>> {
+    return this.snapshot().roots.map(({ id, name, kind, access, status }) => ({ id, name, kind, access, status }));
+  }
+
+  setProjectRoots(paths: string[]): SessionWorkspace {
+    this.replaceProjectRoots(paths);
+    return this.snapshot();
+  }
+
+  authorizeRoot(absolutePath: string, access: WorkspaceAccessMode, actor: EventActor): WorkspaceRootSummary {
     if (!['read_only', 'ask', 'trusted'].includes(access)) throw new Error('目录访问模式无效');
     const candidate = resolve(absolutePath);
     if (!existsSync(candidate) || !statSync(candidate).isDirectory()) throw new Error('授权目录不存在或不是目录');
@@ -217,12 +235,13 @@ export class SessionWorkspaceStore {
     const realProject = realpathSync.native(this.#projectRoot);
     if (realCandidate.toLocaleLowerCase() === realProject.toLocaleLowerCase()) return cloneSummary(this.#roots.get(PROJECT_ROOT_ID)!);
     for (const root of this.#roots.values()) {
-      if (root.kind === 'project') continue;
       try {
         if (realpathSync.native(root.absolutePath).toLocaleLowerCase() === realCandidate.toLocaleLowerCase()) {
-          root.access = access;
-          root.status = 'online';
-          this.append('workspace.root_authorized', actor, { root, absolutePath: root.absolutePath });
+          if (root.kind === 'authorized') {
+            root.access = access;
+            root.status = 'online';
+            this.append('workspace.root_authorized', actor, { root, absolutePath: root.absolutePath });
+          }
           return cloneSummary(root);
         }
       } catch { /* offline roots can coexist until explicitly revoked */ }
@@ -253,7 +272,7 @@ export class SessionWorkspaceStore {
   }
 
   revokeRoot(rootId: string, actor: EventActor): void {
-    if (rootId === PROJECT_ROOT_ID) throw new Error('不能撤销项目根目录');
+    if (this.#roots.get(rootId)?.kind === 'project') throw new Error('不能撤销项目文件夹；请在项目设置中解除绑定');
     if (!this.#roots.delete(rootId)) throw new Error('授权目录不存在');
     if (this.#activeRootId === rootId) this.#activeRootId = PROJECT_ROOT_ID;
     this.append('workspace.root_revoked', actor, { rootId, fallbackRootId: PROJECT_ROOT_ID });
@@ -267,10 +286,10 @@ export class SessionWorkspaceStore {
   }
 
   setNote(note: string, actor: EventActor): SessionWorkspace {
-    if (typeof note !== 'string' || note.length > MAX_NOTE_CHARACTERS) throw new Error(`笺内容不能超过 ${MAX_NOTE_CHARACTERS.toLocaleString()} 字`);
+    if (typeof note !== 'string' || note.length > MAX_NOTE_CHARACTERS) throw new Error(`手账内容不能超过 ${MAX_NOTE_CHARACTERS.toLocaleString()} 字`);
     if (note === this.#note) return this.snapshot();
     this.#note = note;
-    this.append('workspace.note_changed', actor, { note });
+    this.#events.append({ streamId: this.journalStreamId, kind: 'project.journal_changed', actor, payload: toJson({ note }) });
     return this.snapshot();
   }
 
@@ -372,6 +391,12 @@ export class SessionWorkspaceStore {
     if (type?.startsWith('image/') && type !== 'image/svg+xml' && stats.size <= 10 * 1024 * 1024) {
       return { ...base, kind: 'image', dataUrl: `data:${type};base64,${readFileSync(absolute).toString('base64')}` };
     }
+    if (type === 'application/pdf' && stats.size <= MAX_RICH_PREVIEW_FILE_BYTES) {
+      return { ...base, kind: 'pdf', dataUrl: `data:${type};base64,${readFileSync(absolute).toString('base64')}` };
+    }
+    if (type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' && stats.size <= MAX_RICH_PREVIEW_FILE_BYTES) {
+      return { ...base, kind: 'word', dataUrl: `data:${type};base64,${readFileSync(absolute).toString('base64')}` };
+    }
     const textual = type?.startsWith('text/') || ['application/json', 'application/jsonl', 'application/yaml', 'application/xml', 'application/x-tex'].includes(type ?? '');
     if (textual && stats.size <= MAX_PREVIEW_FILE_BYTES) {
       const content = readFileSync(absolute, 'utf8');
@@ -419,6 +444,14 @@ export class SessionWorkspaceStore {
     };
     this.#files.set(file.id, file);
     this.append('conversation.file_registered', actor, file, options.sourceEventIds ?? []);
+    return structuredClone(file);
+  }
+
+  removeConversationFile(id: string, actor: EventActor): ConversationFile {
+    const file = this.#files.get(id);
+    if (!file) throw new Error('对话文件不存在');
+    this.#files.delete(id);
+    this.append('conversation.file_removed', actor, { id, file });
     return structuredClone(file);
   }
 
@@ -560,12 +593,45 @@ export class SessionWorkspaceStore {
 
   private refreshRootStatuses(): void {
     for (const root of this.#roots.values()) {
-      if (root.kind === 'project' || root.status === 'pending_confirmation') continue;
+      if (root.id === PROJECT_ROOT_ID || root.status === 'pending_confirmation') continue;
       try {
         root.status = existsSync(root.absolutePath) && statSync(root.absolutePath).isDirectory() ? 'online' : 'offline';
         if (root.status === 'online') assertNoLink(root.absolutePath, root.absolutePath);
       } catch { root.status = 'offline'; }
     }
+  }
+
+  private replaceProjectRoots(paths: string[]): void {
+    const desired = new Map<string, string>();
+    const primaryKey = this.#projectRoot.toLocaleLowerCase();
+    for (const raw of paths.slice(0, 11)) {
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      const path = resolve(raw);
+      if (path.toLocaleLowerCase() === primaryKey) continue;
+      desired.set(boundProjectRootId(path), path);
+    }
+    for (const [id, root] of this.#roots) {
+      if (id !== PROJECT_ROOT_ID && root.kind === 'project' && !desired.has(id)) this.#roots.delete(id);
+    }
+    for (const [id, path] of desired) {
+      let status: WorkspaceRootSummary['status'] = 'offline';
+      try {
+        if (existsSync(path) && statSync(path).isDirectory()) {
+          assertNoLink(path, path);
+          status = 'online';
+        }
+      } catch { /* Missing, linked, or unreadable bound roots stay visible as offline. */ }
+      this.#roots.set(id, {
+        id,
+        name: basename(path) || '项目文件夹',
+        displayPath: path,
+        kind: 'project',
+        access: 'trusted',
+        status,
+        absolutePath: path,
+      });
+    }
+    if (!this.#roots.has(this.#activeRootId)) this.#activeRootId = PROJECT_ROOT_ID;
   }
 
   private replay(): void {
@@ -576,7 +642,7 @@ export class SessionWorkspaceStore {
         if (typeof value.id !== 'string' || typeof value.name !== 'string' || typeof value.displayPath !== 'string'
           || value.kind !== 'authorized' || !['read_only', 'ask', 'trusted'].includes(String(value.access))) continue;
         this.#roots.set(value.id, {
-          id: value.id, name: value.name, displayPath: value.displayPath, kind: 'authorized', access: value.access as PermissionMode,
+          id: value.id, name: value.name, displayPath: value.displayPath, kind: 'authorized', access: value.access as WorkspaceAccessMode,
           status: value.status === 'pending_confirmation' ? 'pending_confirmation' : 'online', absolutePath: event.payload.absolutePath,
         });
       } else if (event.kind === 'workspace.root_confirmed' && typeof event.payload.rootId === 'string') {
@@ -589,11 +655,17 @@ export class SessionWorkspaceStore {
         this.#note = event.payload.note.slice(0, MAX_NOTE_CHARACTERS);
       } else if (event.kind === 'conversation.file_registered' && typeof event.payload.id === 'string') {
         this.#files.set(event.payload.id, structuredClone(event.payload as unknown as ConversationFile));
+      } else if (event.kind === 'conversation.file_removed' && typeof event.payload.id === 'string') {
+        this.#files.delete(event.payload.id);
       } else if (event.kind === 'workspace.file_operation_completed' && typeof event.payload.id === 'string') {
         this.#changes.set(event.payload.id, structuredClone(event.payload as unknown as WorkspaceFileChange));
       } else if (event.kind === 'workspace.file_operation_reverted' && typeof event.payload.id === 'string') {
         this.#changes.set(event.payload.id, structuredClone(event.payload as unknown as WorkspaceFileChange));
       }
+    }
+    for (const event of this.#events.list(this.journalStreamId)) {
+      if (event.kind !== 'project.journal_changed' || !isRecord(event.payload) || typeof event.payload.note !== 'string') continue;
+      this.#note = event.payload.note.slice(0, MAX_NOTE_CHARACTERS);
     }
   }
 

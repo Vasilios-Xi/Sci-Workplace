@@ -104,7 +104,7 @@ function shellCommand(shell: 'default' | 'powershell' | 'pwsh' | 'cmd' | 'bash' 
     if (shell === 'cmd') return { executable: 'cmd.exe', args: [] };
     if (shell === 'pwsh') return { executable: 'pwsh.exe', args: ['-NoLogo'] };
     if (shell === 'bash' || shell === 'zsh') throw new Error(`Windows 交互终端不支持 ${shell}`);
-    if (shell === 'powershell') return { executable: 'powershell.exe', args: ['-NoLogo'] };
+    if (shell === 'powershell') return { executable: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass'] };
     return { executable: process.env.ComSpec || 'powershell.exe', args: [] };
   }
   if (shell === 'powershell' || shell === 'pwsh' || shell === 'cmd') throw new Error(`当前平台不支持 ${shell}`);

@@ -10,6 +10,12 @@ interface ProjectManifestFile {
   createdAt: string;
 }
 
+export interface ProjectFolderDescriptor {
+  id: string;
+  path: string;
+  name: string;
+}
+
 const PROJECT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -48,6 +54,13 @@ export function resolveProjectFolder(value: unknown): string {
 export function projectFolderSelection(rootPath: string): { path: string; name: string } {
   const path = resolveProjectFolder(rootPath);
   return { path, name: readManifest(path)?.name ?? basename(path) ?? 'Sci Workplace Project' };
+}
+
+export function ensureProjectFolderDescriptor(rootPath: string): ProjectFolderDescriptor {
+  const path = resolveProjectFolder(rootPath);
+  const existing = readManifest(path);
+  const manifest = existing ?? writeProjectManifest(path, basename(path) || 'Sci Workplace Project');
+  return { id: manifest.id, path, name: manifest.name };
 }
 
 export function writeProjectManifest(rootPath: string, projectName: string): ProjectManifestFile {

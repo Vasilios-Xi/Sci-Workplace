@@ -3,6 +3,7 @@ export interface ChatLayoutPreferencesV1 {
   leftSidebarOpen: boolean;
   rightWorkspaceOpen: boolean;
   workspaceTab: 'files' | 'workspace';
+  workspaceWidth: number;
   composerHeight: number | null;
 }
 
@@ -11,12 +12,15 @@ export const defaultChatLayoutPreferences: ChatLayoutPreferencesV1 = {
   leftSidebarOpen: true,
   rightWorkspaceOpen: true,
   workspaceTab: 'workspace',
+  workspaceWidth: 400,
   composerHeight: null,
 };
 
 const STORAGE_PREFIX = 'openlab.chat-layout.v1:';
 const MIN_COMPOSER_HEIGHT = 72;
 const MAX_COMPOSER_HEIGHT = 240;
+const MIN_WORKSPACE_WIDTH = 320;
+const MAX_WORKSPACE_WIDTH = 720;
 
 export function chatLayoutStorageKey(projectId: string): string {
   return `${STORAGE_PREFIX}${encodeURIComponent(projectId)}`;
@@ -24,6 +28,10 @@ export function chatLayoutStorageKey(projectId: string): string {
 
 export function clampComposerHeight(value: number): number {
   return Math.round(Math.min(MAX_COMPOSER_HEIGHT, Math.max(MIN_COMPOSER_HEIGHT, value)));
+}
+
+export function clampWorkspaceWidth(value: number): number {
+  return Math.round(Math.min(MAX_WORKSPACE_WIDTH, Math.max(MIN_WORKSPACE_WIDTH, value)));
 }
 
 export function parseChatLayoutPreferences(raw: string | null | undefined): ChatLayoutPreferencesV1 {
@@ -36,6 +44,7 @@ export function parseChatLayoutPreferences(raw: string | null | undefined): Chat
       || typeof value.leftSidebarOpen !== 'boolean'
       || typeof value.rightWorkspaceOpen !== 'boolean'
       || (value.workspaceTab !== 'files' && value.workspaceTab !== 'workspace')
+      || (value.workspaceWidth !== undefined && (typeof value.workspaceWidth !== 'number' || !Number.isFinite(value.workspaceWidth)))
       || (value.composerHeight !== null && (typeof value.composerHeight !== 'number' || !Number.isFinite(value.composerHeight)))
     ) return { ...defaultChatLayoutPreferences };
     return {
@@ -43,6 +52,7 @@ export function parseChatLayoutPreferences(raw: string | null | undefined): Chat
       leftSidebarOpen: value.leftSidebarOpen,
       rightWorkspaceOpen: value.rightWorkspaceOpen,
       workspaceTab: value.workspaceTab,
+      workspaceWidth: value.workspaceWidth === undefined ? defaultChatLayoutPreferences.workspaceWidth : clampWorkspaceWidth(value.workspaceWidth),
       composerHeight: value.composerHeight === null ? null : clampComposerHeight(value.composerHeight),
     };
   } catch {

@@ -18,6 +18,7 @@ import {
   type BrowserAutomationAction,
   type BrowserElementObservation,
 } from './browser-security.js';
+import { desktopZhCN as copy } from './i18n/zh-CN.js';
 
 const SCREENSHOT_TTL_MS = 5 * 60 * 1_000;
 const UPLOAD_TTL_MS = 10 * 60 * 1_000;
@@ -172,16 +173,18 @@ export class WorktableBrowserManager {
     projectId: string;
     instanceId: string;
     paneId: string;
+    surface?: 'worktable' | 'workspace_preview';
     url: string;
     confirmed: boolean;
   }): Promise<BrowserSessionSummary> {
     const profile = this.requireProfile(input.profileId);
     if (!profile.authorizedProjectIds.includes(input.projectId)) throw new Error('Browser profile is not authorized for this project');
-    const url = normalizeHttpsUrl(input.url);
+    const blank = input.url === 'about:blank';
+    const url = blank ? 'about:blank' : normalizeHttpsUrl(input.url);
     if (!input.confirmed) throw new Error('Opening a browser domain requires confirmation');
     const now = new Date().toISOString();
     const id = randomUUID();
-    const domain = browserDomain(url);
+    const domain = blank ? '' : browserDomain(url);
     const partition = session.fromPartition(profile.partitionId, { cache: true });
     partition.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     partition.setPermissionCheckHandler(() => false);
@@ -202,10 +205,13 @@ export class WorktableBrowserManager {
       profileId: profile.id,
       instanceId: input.instanceId,
       paneId: input.paneId,
+      ...(input.surface ? { surface: input.surface } : {}),
       url,
-      title: domain,
+      title: domain || copy.newBrowserTab,
       status: 'loading',
-      authorizedDomains: [domain],
+      canGoBack: false,
+      canGoForward: false,
+      authorizedDomains: domain ? [domain] : [],
       observationRevision: 0,
       createdAt: now,
       updatedAt: now,
@@ -214,6 +220,7 @@ export class WorktableBrowserManager {
     this.#sessions.set(id, live);
     view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     const guardNavigation = (event: Electron.Event, target: string) => {
+      if (target === 'about:blank') return;
       try {
         const targetDomain = browserDomain(target);
         if (!live.summary.authorizedDomains.includes(targetDomain)) event.preventDefault();
@@ -225,7 +232,9 @@ export class WorktableBrowserManager {
     view.webContents.on('did-finish-load', () => this.patchSession(id, {
       status: 'ready',
       url: view.webContents.getURL(),
-      title: view.webContents.getTitle() || browserDomain(view.webContents.getURL()),
+      title: view.webContents.getTitle() || (view.webContents.getURL() === 'about:blank' ? copy.newBrowserTab : browserDomain(view.webContents.getURL())),
+      canGoBack: view.webContents.navigationHistory.canGoBack(),
+      canGoForward: view.webContents.navigationHistory.canGoForward(),
       observationRevision: live.summary.observationRevision + 1,
     }));
     view.webContents.on('render-process-gone', () => this.patchSession(id, { status: 'crashed' }));
@@ -235,7 +244,8 @@ export class WorktableBrowserManager {
   }
 
   setBounds(sessionId: string, bounds: BrowserViewBounds, visible: boolean): void {
-    const live = this.requireSession(sessionId);
+    const live = this.#sessions.get(sessionId);
+    if (!live) return;
     const safe = {
       x: Math.max(0, Math.floor(bounds.x)),
       y: Math.max(42, Math.floor(bounds.y)),
@@ -263,6 +273,23 @@ export class WorktableBrowserManager {
     live.elementMap.clear();
     live.sensitiveContext = false;
     await live.view.webContents.loadURL(url);
+    return structuredClone(live.summary);
+  }
+
+  async history(sessionId: string, action: 'back' | 'forward' | 'reload'): Promise<BrowserSessionSummary> {
+    const live = this.requireSession(sessionId);
+    const navigation = live.view.webContents.navigationHistory;
+    if (action === 'back' && !navigation.canGoBack()) return structuredClone(live.summary);
+    if (action === 'forward' && !navigation.canGoForward()) return structuredClone(live.summary);
+    const completed = new Promise<void>((resolve) => {
+      const timer = setTimeout(done, 15_000);
+      function done() { clearTimeout(timer); live.view.webContents.removeListener('did-stop-loading', done); resolve(); }
+      live.view.webContents.once('did-stop-loading', done);
+    });
+    if (action === 'back') navigation.goBack();
+    else if (action === 'forward') navigation.goForward();
+    else live.view.webContents.reload();
+    await completed;
     return structuredClone(live.summary);
   }
 

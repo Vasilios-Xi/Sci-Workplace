@@ -68,6 +68,25 @@ describe('v3 persistent Agent definitions', () => {
     expect(replayed.sessionBinding('session-a')).toMatchObject({ leadAgentId: lead.id, memberAgentIds: [member.id] });
     reopened.close();
   });
+
+  it('reuses global Agent definitions across projects while keeping each project binding independent', () => {
+    const { events } = fixture();
+    const projectA = new AgentStore({ events, projectId: 'project-a', defaultModel: () => 'fixture-model' });
+    const lead = projectA.create({ name: 'Lead' });
+    const reviewer = projectA.create({ name: 'Reviewer' });
+
+    const projectB = new AgentStore({ events, projectId: 'project-b', defaultModel: () => 'fixture-model' });
+    expect(projectB.definitions(false).map((agent) => agent.id)).toEqual([lead.id, reviewer.id]);
+    expect(projectB.projectBindings()).toEqual([]);
+    expect(projectB.ensureProjectHasAgent()).toMatchObject({ projectId: 'project-b', agentId: lead.id, enabled: true });
+    projectB.setProjectEnabled(reviewer.id, true);
+    expect(projectB.setSessionBinding('project-b-lead-chat', lead.id, [], { hasMessages: false })).toMatchObject({ leadAgentId: lead.id, memberAgentIds: [] });
+    expect(projectB.setSessionBinding('project-b-review-chat', reviewer.id, [], { hasMessages: false })).toMatchObject({ leadAgentId: reviewer.id, memberAgentIds: [] });
+
+    expect(projectA.projectBindings().filter((binding) => binding.enabled).map((binding) => binding.agentId)).toEqual([lead.id, reviewer.id]);
+    expect(projectB.projectBindings().filter((binding) => binding.enabled).map((binding) => binding.agentId)).toEqual([lead.id, reviewer.id]);
+    events.close();
+  });
 });
 
 describe('v3 Agent memory', () => {

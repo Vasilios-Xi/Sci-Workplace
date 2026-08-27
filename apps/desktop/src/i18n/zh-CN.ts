@@ -4,6 +4,9 @@ export const desktopZhCN = {
   safeStorageCredentialUnavailable: 'Windows 安全存储当前不可用，Sci Workplace 不会以明文保存凭据。',
   credentialEmpty: '凭据内容不能为空',
   runtimeRequestFailed: (status: number) => `Runtime 请求失败：${status}`,
+  conversationFirstMessageRequired: '新会话缺少首条消息',
+  conversationLocationInvalid: '会话定位信息无效',
+  conversationProjectMissing: '找不到这个会话所属的项目，请重新打开项目文件夹',
   runtimeStartTimeout: 'Sci Workplace Runtime 启动超时',
   runtimeStoppedTitle: 'Sci Workplace Runtime 已停止',
   runtimeStoppedMessage: '本地运行时意外退出',
@@ -51,4 +54,6 @@ export const desktopZhCN = {
   saveMessageImage: '保存消息图片',
   httpsOnly: '只允许打开 HTTPS 外部链接',
   chooseBrowserUpload: '选择要上传到当前网页的文件',
+  browser: '浏览器',
+  newBrowserTab: '新标签页',
 } as const;

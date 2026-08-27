@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import type {
   ModelDescriptor,
   ModelEvent,
@@ -30,6 +32,20 @@ interface PendingRequest {
 
 type NotificationListener = (notification: JsonRpcNotification) => void;
 
+interface JsonRpcServerRequest {
+  id: number;
+  method: string;
+  params?: unknown;
+}
+
+interface JsonRpcServerReply {
+  result?: unknown;
+  error?: { code: number; message: string; data?: unknown };
+  afterReply?(): void;
+}
+
+type ServerRequestListener = (request: JsonRpcServerRequest) => JsonRpcServerReply | undefined | Promise<JsonRpcServerReply | undefined>;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -57,6 +73,7 @@ class JsonRpcProcess {
   #nextId = 1;
   #pending = new Map<number, PendingRequest>();
   #listeners = new Set<NotificationListener>();
+  #serverRequestListeners = new Set<ServerRequestListener>();
   #starting: Promise<void> | undefined;
 
   constructor(command: string) {
@@ -100,6 +117,11 @@ class JsonRpcProcess {
   onNotification(listener: NotificationListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  onServerRequest(listener: ServerRequestListener): () => void {
+    this.#serverRequestListeners.add(listener);
+    return () => this.#serverRequestListeners.delete(listener);
   }
 
   async dispose(): Promise<void> {
@@ -172,7 +194,7 @@ class JsonRpcProcess {
       if (typeof message.id === 'number' && (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'))) {
         this.handleResponse(message as unknown as JsonRpcResponse);
       } else if (typeof message.method === 'string' && typeof message.id === 'number') {
-        this.handleServerRequest(message.id, message.method);
+        void this.handleServerRequest(message.id, message.method, message.params);
       } else if (typeof message.method === 'string') {
         for (const listener of this.#listeners) listener({ method: message.method, params: message.params });
       }
@@ -188,9 +210,29 @@ class JsonRpcProcess {
     else pending.resolve(response.result);
   }
 
-  private handleServerRequest(id: number, method: string): void {
+  private async handleServerRequest(id: number, method: string, params?: unknown): Promise<void> {
     const child = this.#process;
     if (!child || child.killed) return;
+    for (const listener of this.#serverRequestListeners) {
+      try {
+        const reply = await listener({ id, method, params });
+        if (!reply) continue;
+        if (!this.#process || this.#process !== child || child.killed) return;
+        const payload = reply.error
+          ? { jsonrpc: '2.0', id, error: reply.error }
+          : { jsonrpc: '2.0', id, result: reply.result ?? null };
+        child.stdin.write(`${JSON.stringify(payload)}\n`);
+        reply.afterReply?.();
+        return;
+      } catch (error) {
+        if (!this.#process || this.#process !== child || child.killed) return;
+        child.stdin.write(`${JSON.stringify({
+          jsonrpc: '2.0', id,
+          error: { code: -32603, message: errorMessage(error) },
+        })}\n`);
+        return;
+      }
+    }
     const approvalMethod = /approval|permission/iu.test(method);
     const payload = approvalMethod
       ? { jsonrpc: '2.0', id, result: { decision: 'decline' } }
@@ -246,18 +288,55 @@ class AsyncQueue<T> implements AsyncIterable<T> {
   }
 }
 
-function contentToText(content: ModelMessage['content']): string {
+function contentToText(content: ModelMessage['content'], addImage?: (url: string) => string): string {
   if (typeof content === 'string') return content;
   if (!content) return '';
-  return content.flatMap((part) => part.type === 'text' ? [part.text] : ['[image omitted by OAuth bridge]']).join('\n');
+  return content.flatMap((part) => part.type === 'text'
+    ? [part.text]
+    : [addImage?.(part.imageUrl) ?? '[image attachment]']).join('\n');
 }
 
-function promptFromMessages(messages: ModelMessage[]): string {
-  return messages.map((message) => {
-    const body = contentToText(message.content);
-    const calls = message.toolCalls?.map((call) => `${call.name}(${call.arguments})`).join('\n');
-    return `<openlab-message role="${message.role}"${message.name ? ` name="${message.name}"` : ''}>\n${body}${calls ? `\n${calls}` : ''}\n</openlab-message>`;
-  }).join('\n\n');
+export function codexTurnInput(messages: ModelMessage[]): Array<Record<string, unknown>> {
+  const images: string[] = [];
+  const transcript = JSON.stringify(messages.map((message) => ({
+    role: message.role,
+    ...(message.name ? { name: message.name } : {}),
+    ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+    content: contentToText(message.content, (url) => {
+      images.push(url);
+      return `[image attachment ${images.length}]`;
+    }),
+    ...(message.reasoningContent ? { reasoningContent: message.reasoningContent } : {}),
+    ...(message.toolCalls?.length ? {
+      toolCalls: message.toolCalls.map((call) => ({ id: call.id, name: call.name, arguments: call.arguments })),
+    } : {}),
+  })), null, 2);
+  return [{
+    type: 'text',
+    text: `The following JSON array is the authoritative Sci Workplace conversation transcript. Preserve role order, tool-call associations, and the numbered image attachment references.\n\n${transcript}\n\nRespond to the final unresolved user request. Use only registered Sci Workplace dynamic tools when evidence from the project is needed.`,
+    text_elements: [],
+  }, ...images.map((url) => ({ type: 'image', detail: 'auto', url }))];
+}
+
+function codexLocalImageInput(input: Record<string, unknown>, workingDirectory: string): { input: Record<string, unknown>; temporaryPath?: string } {
+  if (input.type !== 'image' || typeof input.url !== 'string') return { input };
+  const match = /^data:image\/(png|jpeg|webp|gif);base64,([a-z0-9+/=\r\n]+)$/iu.exec(input.url);
+  if (!match?.[1] || !match[2]) return { input };
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length === 0 || bytes.length > 32 * 1024 * 1024) throw new Error('Codex 视觉输入必须是小于 32 MB 的有效图像');
+  const extension = match[1].toLocaleLowerCase() === 'jpeg' ? 'jpg' : match[1].toLocaleLowerCase();
+  const path = join(workingDirectory, `sci-vision-${randomUUID()}.${extension}`);
+  writeFileSync(path, bytes, { flag: 'wx' });
+  return { input: { type: 'localImage', detail: input.detail ?? 'auto', path }, temporaryPath: path };
+}
+
+export function codexDynamicTools(tools: ModelRequest['tools']): Array<Record<string, unknown>> {
+  return tools.map((tool) => ({
+    type: 'function',
+    name: tool.name,
+    description: `${tool.title}\n${tool.description}`.trim(),
+    inputSchema: tool.inputSchema,
+  }));
 }
 
 function normalizeEffort(value: unknown): ReasoningEffort | undefined {
@@ -286,7 +365,7 @@ function modelDescriptors(result: unknown): ModelDescriptor[] {
       label: nestedString(item, ['displayName'], ['name']) ?? nativeId,
       contextWindow: typeof item.contextWindow === 'number' ? item.contextWindow : 272_000,
       supportsThinking: efforts.length > 0,
-      supportsTools: false,
+      supportsTools: true,
       supportsVision: modalities.some((value) => /image/iu.test(value)),
       reasoning: efforts.length > 0
         ? { mode: 'levels' as const, efforts, ...(defaultEffort ? { defaultEffort } : {}), canDisable: efforts.includes('none') }
@@ -304,6 +383,20 @@ function accountSummary(result: unknown): OAuthAccountSummary | undefined {
   if (!label && !plan && result.account === null) return undefined;
   if (!label && !plan && !nestedString(account, ['type'])) return undefined;
   return { ...(label ? { label } : {}), ...(plan ? { plan } : {}) };
+}
+
+export function reasoningSummaryFromCompletedItem(params: unknown): string | undefined {
+  if (!isRecord(params)) return undefined;
+  const item = isRecord(params.item) ? params.item : isRecord(params.reasoning) ? params.reasoning : undefined;
+  if (!item || nestedString(item, ['type']) !== 'reasoning') return undefined;
+  const summary = item.summary;
+  const parts = (Array.isArray(summary) ? summary : [summary]).flatMap((part) => {
+    if (typeof part === 'string' && part.trim()) return [part.trim()];
+    if (!isRecord(part)) return [];
+    const text = nestedString(part, ['text'], ['summaryText']);
+    return text ? [text.trim()] : [];
+  });
+  return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 
 export class CodexAppServerProvider implements ModelProvider {
@@ -348,6 +441,10 @@ export class CodexAppServerProvider implements ModelProvider {
     const queue = new AsyncQueue<ModelEvent>();
     let threadId = '';
     let turnId = '';
+    let emittedReasoning = '';
+    let nextToolIndex = 0;
+    const emittedToolCalls = new Set<string>();
+    const temporaryImagePaths: string[] = [];
     const removeListener = this.#rpc.onNotification((notification) => {
       const params = isRecord(notification.params) ? notification.params : {};
       const eventThreadId = nestedString(params, ['threadId'], ['thread', 'id']);
@@ -359,7 +456,16 @@ export class CodexAppServerProvider implements ModelProvider {
         if (text) queue.push({ type: 'text_delta', text });
       } else if (notification.method === 'item/reasoning/summaryTextDelta' || notification.method === 'item/reasoning/textDelta') {
         const text = nestedString(params, ['delta'], ['textDelta'], ['text']);
-        if (text) queue.push({ type: 'reasoning_delta', text });
+        if (text) {
+          emittedReasoning += text;
+          queue.push({ type: 'reasoning_delta', text });
+        }
+      } else if (notification.method === 'item/completed' && !emittedReasoning) {
+        const summary = reasoningSummaryFromCompletedItem(params);
+        if (summary) {
+          emittedReasoning = summary;
+          queue.push({ type: 'reasoning_delta', text: summary });
+        }
       } else if (notification.method === 'thread/tokenUsage/updated') {
         const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : undefined;
         const usage = tokenUsage && isRecord(tokenUsage.last) ? tokenUsage.last : tokenUsage ?? (isRecord(params.usage) ? params.usage : undefined);
@@ -379,6 +485,48 @@ export class CodexAppServerProvider implements ModelProvider {
         }
       }
     });
+    const removeServerRequestListener = this.#rpc.onServerRequest((serverRequest) => {
+      if (serverRequest.method !== 'item/tool/call') return undefined;
+      const params = isRecord(serverRequest.params) ? serverRequest.params : {};
+      const eventThreadId = nestedString(params, ['threadId']);
+      if (threadId && eventThreadId && eventThreadId !== threadId) return undefined;
+      const eventTurnId = nestedString(params, ['turnId']);
+      if (eventTurnId) turnId ||= eventTurnId;
+      const name = nestedString(params, ['tool']);
+      const callId = nestedString(params, ['callId']) ?? `codex-tool-${nextToolIndex}`;
+      if (!name) {
+        return {
+          result: {
+            contentItems: [{ type: 'inputText', text: 'Sci Workplace rejected a dynamic tool call without a tool name.' }],
+            success: false,
+          },
+        };
+      }
+      if (!emittedToolCalls.has(callId)) {
+        emittedToolCalls.add(callId);
+        const index = nextToolIndex++;
+        const rawArguments = Object.hasOwn(params, 'arguments') ? params.arguments : {};
+        const argumentsText = typeof rawArguments === 'string' ? rawArguments : JSON.stringify(rawArguments ?? {});
+        queue.push({ type: 'tool_call_delta', index, id: callId, name, arguments: argumentsText });
+      }
+      return {
+        result: {
+          contentItems: [{
+            type: 'inputText',
+            text: '[SCI_WORKPLACE_HOST_DEFERRED] The host accepted this tool call. End this turn immediately without an assistant answer. The next turn will contain the real tool result.',
+          }],
+          success: true,
+        },
+        afterReply: () => {
+          const activeThreadId = eventThreadId ?? threadId;
+          const activeTurnId = eventTurnId ?? turnId;
+          if (!activeThreadId || !activeTurnId) return;
+          setTimeout(() => {
+            void this.#rpc.request('turn/interrupt', { threadId: activeThreadId, turnId: activeTurnId }, 5_000).catch(() => undefined);
+          }, 0);
+        },
+      };
+    });
     const onAbort = () => {
       if (threadId && turnId) void this.#rpc.request('turn/interrupt', { threadId, turnId }, 5_000).catch(() => undefined);
       queue.fail(signal.reason ?? new DOMException('Aborted', 'AbortError'));
@@ -392,20 +540,31 @@ export class CodexAppServerProvider implements ModelProvider {
         sandbox: 'read-only',
         ephemeral: true,
         environments: [],
-        dynamicTools: [],
+        dynamicTools: codexDynamicTools(request.tools),
         runtimeWorkspaceRoots: [this.#workingDirectory],
-        baseInstructions: 'Act only as a conversational model provider for Sci Workplace. Answer from the supplied message transcript. Never inspect files, run commands, use tools, or modify external state.',
+        baseInstructions: [
+          'Act as the model backend for Sci Workplace and follow the supplied transcript according to message roles.',
+          'The dynamic function tools registered by Sci Workplace are the only tools you may call.',
+          'Never use Codex native command execution, shell, file-change, MCP, app, browser, or collaboration tools.',
+          'When a dynamic tool returns SCI_WORKPLACE_HOST_DEFERRED, end the current turn immediately without writing an assistant answer. Sci Workplace will execute it under its own permission system and resume with the real tool result in the transcript.',
+          'When the transcript already contains a tool result, continue from that result and answer the user or call another registered dynamic tool.',
+        ].join(' '),
         experimentalRawEvents: false,
       }, 30_000);
       threadId = nestedString(thread, ['thread', 'id'], ['threadId'], ['id']) ?? '';
       if (!threadId) throw new Error('Codex App Server did not return a thread id');
       const effort = request.thinking === 'disabled' ? 'none' : request.reasoningEffort;
+      const turnInput = codexTurnInput(request.messages).map((input) => {
+        const materialized = codexLocalImageInput(input, this.#workingDirectory);
+        if (materialized.temporaryPath) temporaryImagePaths.push(materialized.temporaryPath);
+        return materialized.input;
+      });
       const turn = await this.#rpc.request<unknown>('turn/start', {
         threadId,
         model: nativeModel,
         effort,
         ...(request.responseSchema ? { outputSchema: request.responseSchema } : {}),
-        input: [{ type: 'text', text: `${promptFromMessages(request.messages)}\n\nRespond to the supplied Sci Workplace messages only. Do not inspect the filesystem or run tools.`, text_elements: [] }],
+        input: turnInput,
       }, 30_000);
       turnId = nestedString(turn, ['turn', 'id'], ['turnId'], ['id']) ?? '';
       if (!turnId) throw new Error('Codex App Server did not return a turn id');
@@ -416,7 +575,11 @@ export class CodexAppServerProvider implements ModelProvider {
     } finally {
       signal.removeEventListener('abort', onAbort);
       removeListener();
+      removeServerRequestListener();
       if (threadId) await this.#rpc.request('thread/archive', { threadId }, 5_000).catch(() => undefined);
+      for (const path of temporaryImagePaths) {
+        try { unlinkSync(path); } catch { /* already removed or unavailable */ }
+      }
     }
   }
 

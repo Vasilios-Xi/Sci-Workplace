@@ -3,7 +3,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import { createNodeWebSocket } from '@hono/node-ws';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import type { AgentCardExport, AgentDefinition, AgentDefinitionUpdate, AgentMemoryKind, AgentMemoryScope, AgentToolPolicy, Annotation, AnnotationSelector, ArtifactProvenance, ArtifactRevisionFile, ChatAttachmentRef, CollaborationChannel, DocumentRevisionRef, HarnessSettings, JobSpec, JsonValue, McpServerConfig, ModelProviderConfig, ModelProviderId, PermissionMode, PrimaryAgentProfileUpdate, ReasoningEffort, ServerPushMessage, SourceMapDescriptor, WorkspaceEditRequest, WorkspacePathRef, WorktableRevealTarget } from '@openlab/protocol';
+import type { AgentCardExport, AgentDefinition, AgentDefinitionUpdate, AgentMemoryKind, AgentMemoryScope, AgentToolPolicy, Annotation, AnnotationSelector, ArtifactProvenance, ArtifactRevisionFile, ChatAttachmentRef, CollaborationChannel, ConversationStartInput, DocumentRevisionRef, HarnessSettings, JobSpec, JsonValue, McpServerConfig, ModelProviderConfig, ModelProviderId, PermissionMode, PrimaryAgentProfileUpdate, ReasoningEffort, ServerPushMessage, SourceMapDescriptor, UserProfileUpdate, WorkspaceAccessMode, WorkspaceEditRequest, WorkspacePathRef, WorktableRevealTarget } from '@openlab/protocol';
 import { PROTOCOL_VERSION } from '@openlab/protocol';
 import type { WorkspaceFileOperation } from '../workspace/session-workspace-store.js';
 import type { OpenLabRuntime } from '../runtime.js';
@@ -19,6 +19,22 @@ function jsonError(error: unknown): { error: { message: string } } {
 }
 
 const PROVIDER_IDS = new Set<ModelProviderId>(['chatgpt-oauth', 'grok-oauth', 'minimax-coding-plan', 'kimi-coding-plan', 'glm-coding-plan', 'deepseek', 'ollama', 'lm-studio']);
+
+// Chromium rejects requests to these legacy service ports before they reach a
+// loopback server. An ephemeral OS allocation can still land on one (Windows
+// has configurable dynamic ranges), so Runtime must validate the resolved port.
+const CHROMIUM_RESTRICTED_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723,
+  2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697,
+  10080,
+]);
+
+export function isBrowserSafeLoopbackPort(port: number): boolean {
+  return Number.isInteger(port) && port > 0 && port <= 65_535 && !CHROMIUM_RESTRICTED_PORTS.has(port);
+}
 
 function providerId(value: string): ModelProviderId {
   if (!PROVIDER_IDS.has(value as ModelProviderId)) throw new Error('未知模型供应商');
@@ -124,6 +140,12 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
   app.get('/api/bootstrap', async (context) => context.json(await runtime.snapshot()));
   app.get('/api/status', (context) => context.json(runtime.status()));
   app.get('/api/diagnostics', (context) => context.body(JSON.stringify(runtime.diagnostics()), 200, { 'Content-Type': 'application/json' }));
+  app.post('/api/conversations/start', async (context) => {
+    try {
+      const body = await context.req.json<ConversationStartInput>();
+      return context.json(await runtime.startConversation(body), 201);
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
   app.post('/api/chat', async (context) => {
     try {
       const body = await context.req.json<{
@@ -131,7 +153,8 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
         model?: string;
         thinking?: 'enabled' | 'disabled';
         reasoningEffort?: ReasoningEffort;
-        permissionMode?: 'read_only' | 'ask' | 'trusted';
+        permissionMode?: PermissionMode;
+        interfaceLocale?: string;
         skillIds?: string[];
         attachments?: ChatAttachmentRef[];
         researchObjectIds?: string[];
@@ -144,6 +167,7 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
         ...(body.thinking ? { thinking: body.thinking } : {}),
         ...(body.reasoningEffort ? { reasoningEffort: body.reasoningEffort } : {}),
         ...(body.permissionMode ? { permissionMode: body.permissionMode } : {}),
+        ...(body.interfaceLocale ? { interfaceLocale: body.interfaceLocale } : {}),
         ...(body.skillIds ? { skillIds: body.skillIds } : {}),
         ...(body.attachments ? { attachments: body.attachments } : {}),
         ...(body.researchObjectIds ? { researchObjectIds: body.researchObjectIds } : {}),
@@ -171,16 +195,23 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
   });
   app.post('/api/sessions', async (context) => {
     try {
-      const body: { title?: string; leadAgentId?: string; memberAgentIds?: string[] } = await context.req.json<{ title?: string; leadAgentId?: string; memberAgentIds?: string[] }>().catch(() => ({}));
-      return context.json(runtime.createSession(body.title ?? '新研究对话', body.leadAgentId, body.memberAgentIds ?? []), 201);
+      const body: { title?: string; leadAgentId?: string; memberAgentIds?: string[]; temporary?: boolean } = await context.req.json<{ title?: string; leadAgentId?: string; memberAgentIds?: string[]; temporary?: boolean }>().catch(() => ({}));
+      return context.json(runtime.createSession(body.title ?? (body.temporary ? '临时聊天' : '新研究对话'), body.leadAgentId, body.memberAgentIds ?? [], body.temporary === true), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
   });
-  app.post('/api/sessions/:id/activate', (context) => {
-    try { runtime.switchSession(context.req.param('id')); return context.json({ ok: true }); }
+  app.post('/api/sessions/:id/activate', async (context) => {
+    try {
+      runtime.switchSession(context.req.param('id'));
+      return context.json(await runtime.snapshot());
+    }
     catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/sessions/:id/archive', (context) => {
     try { return context.json(runtime.archiveSession(context.req.param('id'))); }
+    catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/sessions/archive-project', (context) => {
+    try { return context.json(runtime.archiveProjectSessions()); }
     catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/sessions/:id/unarchive', (context) => {
@@ -189,8 +220,8 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
   });
   app.post('/api/sessions/:id/fork', async (context) => {
     try {
-      const body: { title?: string; throughNodeId?: string } = await context.req.json<{ title?: string; throughNodeId?: string }>().catch(() => ({}));
-      return context.json(runtime.forkSession(context.req.param('id'), body.title, body.throughNodeId), 201);
+      const body: { title?: string; throughNodeId?: string; beforeNodeId?: string } = await context.req.json<{ title?: string; throughNodeId?: string; beforeNodeId?: string }>().catch(() => ({}));
+      return context.json(runtime.forkSession(context.req.param('id'), body.title, body.throughNodeId, body.beforeNodeId), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
   });
 
@@ -224,9 +255,16 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
       return context.json(runtime.setWorkspaceNote(body.note ?? ''));
     } catch (error) { return context.json(jsonError(error), 400); }
   });
+  app.put('/api/project/source-folders', async (context) => {
+    try {
+      const body = await context.req.json<{ paths?: string[] }>();
+      if (!Array.isArray(body.paths) || !body.paths.every((path) => typeof path === 'string')) throw new Error('项目文件夹列表无效');
+      return context.json(runtime.setProjectRoots(body.paths));
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
   app.post('/api/workspace/roots', async (context) => {
     try {
-      const body = await context.req.json<{ path?: string; access?: PermissionMode; confirmed?: boolean }>();
+      const body = await context.req.json<{ path?: string; access?: WorkspaceAccessMode; confirmed?: boolean }>();
       if (!body.confirmed || !body.path) throw new Error('目录授权需要用户通过本地选择器逐次确认');
       return context.json(runtime.authorizeWorkspaceRoot(body.path, body.access ?? 'ask'), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
@@ -269,6 +307,16 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
       if (!body.ref) throw new Error('缺少文件引用');
       return context.json(runtime.addConversationFile(body.ref, body.origin ?? 'reference', { ...(body.artifactId ? { artifactId: body.artifactId } : {}), ...(body.sourceEventIds ? { sourceEventIds: body.sourceEventIds } : {}) }), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/project/rename', async (context) => {
+    try {
+      const body = await context.req.json<{ name?: string }>();
+      return context.json(runtime.renameProject(body.name ?? ''));
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.delete('/api/workspace/conversation-files/:id', (context) => {
+    try { return context.json(runtime.removeConversationFile(context.req.param('id'))); }
+    catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/workspace/shell-path', async (context) => {
     try { return context.json({ path: runtime.resolveWorkspacePathForShell(await context.req.json<WorkspacePathRef>()) }); }
@@ -440,6 +488,10 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     try { return context.json(runtime.archiveWorktable(context.req.param('id'))); }
     catch (error) { return context.json(jsonError(error), 400); }
   });
+  app.post('/api/worktable/instances/:id/restore', (context) => {
+    try { return context.json(runtime.restoreWorktable(context.req.param('id'))); }
+    catch (error) { return context.json(jsonError(error), 400); }
+  });
   app.post('/api/worktable/instances/:id/layout', async (context) => {
     try {
       const body = await context.req.json<Parameters<OpenLabRuntime['setWorktableLayout']>[1]>();
@@ -578,6 +630,19 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
   app.post('/api/settings/harness', async (context) => {
     try { return context.json(runtime.setHarnessSettings(await context.req.json<Partial<HarnessSettings>>())); }
     catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/terminal/previews/:id', async (context) => {
+    try {
+      const body = await context.req.json<unknown>();
+      return context.json(await runtime.previewTerminalAction(context.req.param('id'), body) as never);
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/settings/user-profile', async (context) => {
+    try {
+      const body = await context.req.json<UserProfileUpdate & { confirmed?: boolean }>();
+      if (body.confirmed !== true) throw new Error('需要用户明确确认个人资料');
+      return context.json(runtime.configureUserProfile(body));
+    } catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/settings/primary-agent', async (context) => {
     try {
@@ -906,13 +971,25 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     };
   }));
 
+  if (options.port !== 0 && !isBrowserSafeLoopbackPort(options.port)) throw new Error(`Runtime port ${options.port} is blocked by Chromium`);
   let server!: ServerType;
-  const port = await new Promise<number>((resolvePromise, reject) => {
-    try {
-      server = serve({ fetch: app.fetch, hostname: options.host, port: options.port }, (info) => resolvePromise(info.port));
-      server.once('error', reject);
-    } catch (error) { reject(error); }
-  });
+  let port = 0;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const listening = await new Promise<{ server: ServerType; port: number }>((resolvePromise, reject) => {
+      try {
+        let candidate!: ServerType;
+        candidate = serve({ fetch: app.fetch, hostname: options.host, port: options.port }, (info) => resolvePromise({ server: candidate, port: info.port }));
+        candidate.once('error', reject);
+      } catch (error) { reject(error); }
+    });
+    if (isBrowserSafeLoopbackPort(listening.port)) {
+      server = listening.server;
+      port = listening.port;
+      break;
+    }
+    await new Promise<void>((resolvePromise, reject) => listening.server.close((error) => error ? reject(error) : resolvePromise()));
+  }
+  if (!server || port === 0) throw new Error('Unable to allocate a browser-safe Runtime port');
   injectWebSocket(server);
   return {
     port,

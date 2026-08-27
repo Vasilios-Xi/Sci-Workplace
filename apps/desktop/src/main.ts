@@ -1,30 +1,54 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { fork, type ChildProcess } from 'node:child_process';
+import { fork, spawn, type ChildProcess } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, safeStorage, session, shell } from 'electron';
 import {
   mergeInterfacePreferences,
   normalizeInterfacePreferences,
+  type BootstrapSnapshot,
+  type ChatAttachmentRef,
+  type ConversationActivateInput,
+  type ConversationStartInput,
+  type ConversationSourceDescriptor,
+  type ConversationStartResult,
+  type DesktopConversationActivateResult,
+  type DesktopConversationStartInput,
+  type DesktopConversationStartResult,
   type InterfacePreferences,
   type InterfacePreferencesPatch,
   type InterfacePreferencesUpdateResult,
+  type RuntimeConnectionDescriptor,
   type WorktableDeviceUiState,
 } from '@openlab/protocol';
 import { desktopZhCN as copy } from './i18n/zh-CN.js';
-import { readDesktopSettings, writeDesktopSettingsAtomic, type DesktopSettings } from './settings-store.js';
+import {
+  forgetProjectSourceFolders,
+  orderedProjectRootCandidates,
+  projectSourceFolders,
+  readDesktopSettings,
+  rememberRecentProjectRoot,
+  rememberProjectSourceFolders,
+  writeDesktopSettingsAtomic,
+  type DesktopSettings,
+} from './settings-store.js';
 import { WorktableBrowserManager, type BrowserViewBounds } from './browser-manager.js';
 import { BrowserAutomationBroker } from './browser-broker.js';
 import { parseBrowserAutomationAction } from './browser-security.js';
-import { projectFolderSelection, projectGitBranch, resolveProjectFolder, writeProjectManifest } from './project-manifest.js';
+import { ensureProjectFolderDescriptor, projectFolderSelection, projectGitBranch, resolveProjectFolder, writeProjectManifest } from './project-manifest.js';
 
-interface RuntimeConnection {
-  baseUrl: string;
-  token: string;
+interface RuntimeConnection extends RuntimeConnectionDescriptor {}
+
+interface RuntimeSlot {
+  key: string;
+  child: ChildProcess;
+  ready: Promise<RuntimeConnection>;
   projectRoot: string;
   projectFolderSelected: boolean;
+  lastUsed: number;
+  leases: number;
 }
 
 interface RuntimeReadyMessage {
@@ -52,6 +76,12 @@ let mainWindow: BrowserWindow | undefined;
 let runtimeChild: ChildProcess | undefined;
 let connection: RuntimeConnection | undefined;
 let runtimeReady: Promise<RuntimeConnection> | undefined;
+let runtimeTransition: Promise<void> = Promise.resolve();
+const runtimeChildren = new Set<ChildProcess>();
+const runtimeSlots = new Map<string, RuntimeSlot>();
+const MAX_RUNTIME_SLOTS = 3;
+let runtimeUseSequence = 0;
+let runtimePrewarmTimer: NodeJS.Timeout | undefined;
 let browserManager: WorktableBrowserManager | undefined;
 let browserBroker: BrowserAutomationBroker | undefined;
 let browserBrokerConnection: { url: string; token: string } | undefined;
@@ -66,6 +96,75 @@ function readSettings(): DesktopSettings {
 
 function writeSettings(settings: DesktopSettings): void {
   writeDesktopSettingsAtomic(settingsPath(), settings);
+}
+
+function rememberRecentProject(rootPath: string, settings = readSettings()): DesktopSettings {
+  const root = resolve(rootPath);
+  return rememberRecentProjectRoot(settings, root);
+}
+
+function rememberProject(rootPath: string, settings = readSettings()): DesktopSettings {
+  const root = resolve(rootPath);
+  return { ...rememberRecentProject(root, settings), projectRoot: root };
+}
+
+function recentProjects(): Array<ConversationSourceDescriptor & { kind: 'project' }> {
+  const settings = readSettings();
+  const active = selectedProjectRoot();
+  const candidates = orderedProjectRootCandidates(settings, active);
+  const seen = new Set<string>();
+  const projects: Array<ConversationSourceDescriptor & { kind: 'project' }> = [];
+  for (const candidate of candidates) {
+    try {
+      const project = ensureProjectFolderDescriptor(candidate);
+      const key = project.path.toLocaleLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const folders = projectSourceFolders(settings, project.id, project.path);
+      projects.push({
+        kind: 'project', projectId: project.id, rootPath: project.path, name: project.name,
+        ...(folders.length > 1 ? { additionalRoots: folders.slice(1) } : {}),
+      });
+    } catch { /* Missing recent folders are omitted from the project picker. */ }
+  }
+  return projects.slice(0, 20);
+}
+
+function conversationSources(): ConversationSourceDescriptor[] {
+  const detached = ensureProjectFolderDescriptor(unboundProjectRoot());
+  return [
+    { kind: 'detached', projectId: detached.id, rootPath: detached.path, name: '' },
+    ...recentProjects(),
+  ];
+}
+
+function resolveProjectActionTarget(rawInput: unknown): ConversationSourceDescriptor & { kind: 'project' } {
+  const value = typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput)
+    ? rawInput as { projectId?: unknown; rootPath?: unknown }
+    : {};
+  if (typeof value.projectId !== 'string') throw new Error(copy.conversationLocationInvalid);
+  const project = ensureProjectFolderDescriptor(resolveProjectFolder(value.rootPath));
+  if (project.id !== value.projectId) throw new Error(copy.conversationProjectMissing);
+  const folders = projectSourceFolders(readSettings(), project.id, project.path);
+  return {
+    kind: 'project', projectId: project.id, rootPath: project.path, name: project.name,
+    ...(folders.length > 1 ? { additionalRoots: folders.slice(1) } : {}),
+  };
+}
+
+async function withProjectRuntime<T>(rootPath: string, operation: (target: RuntimeConnection) => Promise<T>): Promise<T> {
+  const normalized = resolveProjectFolder(rootPath);
+  if (connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === runtimeTargetKey(normalized, true)) {
+    return await operation(connection);
+  }
+  const slot = acquireRuntime(normalized, true);
+  slot.leases++;
+  try {
+    return await operation(await slot.ready);
+  } finally {
+    slot.leases--;
+    trimRuntimeSlots();
+  }
 }
 
 const startupInterfacePreferences = normalizeInterfacePreferences(readSettings().interfacePreferences);
@@ -105,6 +204,15 @@ function selectedProjectRoot(): string | undefined {
 function defaultProjectRoot(): string {
   const selected = selectedProjectRoot();
   if (selected) return selected;
+  return unboundProjectRoot();
+}
+
+function unboundProjectRoot(): string {
+  if (process.env.OPENLAB_TEST_USER_DATA_ROOT) {
+    const root = join(app.getPath('userData'), 'unbound-workspace');
+    mkdirSync(root, { recursive: true });
+    return root;
+  }
   const root = join(app.getPath('documents'), 'Sci Workplace Projects', 'Getting Started');
   mkdirSync(root, { recursive: true });
   return root;
@@ -150,8 +258,7 @@ function saveMcpCredential(value: string): string {
   return id;
 }
 
-async function runtimeRequest(path: string, init?: RequestInit): Promise<Response> {
-  const target = connection ?? await startRuntime();
+async function runtimeRequestAt(target: RuntimeConnection, path: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(`${target.baseUrl}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${target.token}`, 'Content-Type': 'application/json', ...init?.headers },
@@ -163,25 +270,55 @@ async function runtimeRequest(path: string, init?: RequestInit): Promise<Respons
   return response;
 }
 
-async function stopRuntime(): Promise<void> {
-  const child = runtimeChild;
-  runtimeChild = undefined;
-  connection = undefined;
-  runtimeReady = undefined;
-  if (!child) return;
-  child.send?.({ type: 'shutdown' });
+async function runtimeRequest(path: string, init?: RequestInit): Promise<Response> {
+  return await runtimeRequestAt(connection ?? await startRuntime(), path, init);
+}
+
+async function runtimeSnapshotAt(target: RuntimeConnection): Promise<BootstrapSnapshot> {
+  const response = await runtimeRequestAt(target, '/api/bootstrap');
+  return await response.json() as BootstrapSnapshot;
+}
+
+async function runtimeRequestAll(path: string, init?: RequestInit): Promise<void> {
+  const active = connection ?? await startRuntime();
+  await runtimeRequestAt(active, path, init);
+  const activeKey = runtimeTargetKey(active.projectRoot, active.projectFolderSelected);
+  const slots = [...runtimeSlots.values()];
+  await Promise.allSettled(slots.map(async (slot) => {
+    if (slot.key === activeKey || !runtimeSlotIsAlive(slot)) return;
+    await runtimeRequestAt(await slot.ready, path, init);
+  }));
+}
+
+async function stopRuntimeChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try { child.send?.({ type: 'shutdown' }); }
+  catch { child.kill(); }
   await new Promise<void>((resolvePromise) => {
     const timer = setTimeout(() => { child.kill(); resolvePromise(); }, 10_000);
     child.once('exit', () => { clearTimeout(timer); resolvePromise(); });
   });
 }
 
-function startRuntime(projectRoot = defaultProjectRoot()): Promise<RuntimeConnection> {
-  if (runtimeReady) return runtimeReady;
-  runtimeReady = new Promise<RuntimeConnection>((resolvePromise, reject) => {
+async function stopRuntime(): Promise<void> {
+  const child = runtimeChild;
+  runtimeChild = undefined;
+  connection = undefined;
+  runtimeReady = undefined;
+  if (child) {
+    removeRuntimeSlot(child);
+    await stopRuntimeChild(child);
+  }
+}
+
+function spawnRuntime(projectRoot: string, projectFolderSelectedOverride?: boolean): { child: ChildProcess; ready: Promise<RuntimeConnection> } {
+  let child!: ChildProcess;
+  const ready = new Promise<RuntimeConnection>((resolvePromise, reject) => {
+    const project = ensureProjectFolderDescriptor(projectRoot);
+    const additionalProjectRoots = projectSourceFolders(readSettings(), project.id, project.path).slice(1);
     const childEntry = require.resolve('@openlab/runtime/child');
     const authToken = randomBytes(32).toString('hex');
-    const child = fork(childEntry, [], {
+    child = fork(childEntry, [], {
       cwd: projectRoot,
       execPath: process.execPath,
       env: {
@@ -194,7 +331,7 @@ function startRuntime(projectRoot = defaultProjectRoot()): Promise<RuntimeConnec
       },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
-    runtimeChild = child;
+    runtimeChildren.add(child);
     let startupSettled = false;
     child.stdout?.on('data', () => undefined);
     child.stderr?.on('data', (chunk: Buffer) => {
@@ -203,11 +340,6 @@ function startRuntime(projectRoot = defaultProjectRoot()): Promise<RuntimeConnec
     const timer = setTimeout(() => {
       if (startupSettled) return;
       startupSettled = true;
-      if (runtimeChild === child) {
-        runtimeChild = undefined;
-        connection = undefined;
-        runtimeReady = undefined;
-      }
       child.kill();
       reject(new Error(copy.runtimeStartTimeout));
     }, 90_000);
@@ -223,12 +355,13 @@ function startRuntime(projectRoot = defaultProjectRoot()): Promise<RuntimeConnec
       if (message.type === 'ready' && !startupSettled) {
         startupSettled = true;
         clearTimeout(timer);
-        connection = { baseUrl: message.url, token: message.authToken, projectRoot, projectFolderSelected: selectedProjectRoot() === resolve(projectRoot) };
-        resolvePromise(connection);
+        resolvePromise({ baseUrl: message.url, token: message.authToken, projectRoot, projectFolderSelected: projectFolderSelectedOverride ?? selectedProjectRoot() === resolve(projectRoot) });
       }
     });
     child.once('exit', (code) => {
       clearTimeout(timer);
+      runtimeChildren.delete(child);
+      removeRuntimeSlot(child);
       if (!startupSettled) {
         startupSettled = true;
         reject(new Error(`${copy.runtimeStoppedMessage}${code === null ? '' : ` (${copy.exitCode(code)})`}`));
@@ -244,6 +377,7 @@ function startRuntime(projectRoot = defaultProjectRoot()): Promise<RuntimeConnec
       type: 'start',
       config: {
         host: '127.0.0.1', port: 0, authToken, projectRoot,
+        ...(additionalProjectRoots.length ? { projectRoots: additionalProjectRoots } : {}),
         home: app.getPath('userData'), demo: false,
         credentials: readMcpCredentials(),
         ...(browserBrokerConnection ? { browserBroker: browserBrokerConnection } : {}),
@@ -251,7 +385,293 @@ function startRuntime(projectRoot = defaultProjectRoot()): Promise<RuntimeConnec
       },
     });
   });
+  return { child, ready };
+}
+
+function runtimeTargetKey(projectRoot: string, projectFolderSelected: boolean): string {
+  return `${resolve(projectRoot).toLocaleLowerCase()}\u0000${projectFolderSelected ? 'project' : 'detached'}`;
+}
+
+function runtimeSlotForChild(child: ChildProcess): RuntimeSlot | undefined {
+  return [...runtimeSlots.values()].find((slot) => slot.child === child);
+}
+
+function removeRuntimeSlot(child: ChildProcess): void {
+  const slot = runtimeSlotForChild(child);
+  if (slot && runtimeSlots.get(slot.key) === slot) runtimeSlots.delete(slot.key);
+}
+
+function touchRuntimeSlot(slot: RuntimeSlot): void {
+  slot.lastUsed = ++runtimeUseSequence;
+}
+
+function runtimeSlotIsAlive(slot: RuntimeSlot): boolean {
+  return !slot.child.killed && slot.child.exitCode === null && slot.child.signalCode === null;
+}
+
+function acquireRuntime(projectRoot: string, projectFolderSelected: boolean): RuntimeSlot {
+  const targetRoot = resolve(projectRoot);
+  const key = runtimeTargetKey(targetRoot, projectFolderSelected);
+  const existing = runtimeSlots.get(key);
+  if (existing && runtimeSlotIsAlive(existing)) {
+    touchRuntimeSlot(existing);
+    return existing;
+  }
+  if (existing) runtimeSlots.delete(key);
+  const launch = spawnRuntime(targetRoot, projectFolderSelected);
+  const slot: RuntimeSlot = {
+    key,
+    child: launch.child,
+    ready: launch.ready,
+    projectRoot: targetRoot,
+    projectFolderSelected,
+    lastUsed: ++runtimeUseSequence,
+    leases: 0,
+  };
+  runtimeSlots.set(key, slot);
+  void slot.ready.catch(() => {
+    if (runtimeSlots.get(key) === slot) runtimeSlots.delete(key);
+  });
+  return slot;
+}
+
+function trimRuntimeSlots(): void {
+  if (runtimeSlots.size <= MAX_RUNTIME_SLOTS) return;
+  const removable = [...runtimeSlots.values()]
+    .filter((slot) => slot.child !== runtimeChild && slot.leases === 0)
+    .sort((left, right) => left.lastUsed - right.lastUsed);
+  while (runtimeSlots.size > MAX_RUNTIME_SLOTS && removable.length > 0) {
+    const slot = removable.shift()!;
+    if (runtimeSlots.get(slot.key) !== slot) continue;
+    runtimeSlots.delete(slot.key);
+    void stopRuntimeChild(slot.child).catch(() => undefined);
+  }
+}
+
+function invalidateInactiveRuntimes(): void {
+  for (const slot of [...runtimeSlots.values()]) {
+    if (slot.child === runtimeChild) continue;
+    if (runtimeSlots.get(slot.key) === slot) runtimeSlots.delete(slot.key);
+    void stopRuntimeChild(slot.child).catch(() => undefined);
+  }
+}
+
+function invalidateRuntimeTarget(projectRoot: string, projectFolderSelected: boolean): void {
+  const slot = runtimeSlots.get(runtimeTargetKey(projectRoot, projectFolderSelected));
+  if (!slot || slot.child === runtimeChild) return;
+  runtimeSlots.delete(slot.key);
+  void stopRuntimeChild(slot.child).catch(() => undefined);
+}
+
+function prepareRuntime(projectRoot: string, projectFolderSelected: boolean): void {
+  const targetRoot = resolve(projectRoot);
+  const key = runtimeTargetKey(targetRoot, projectFolderSelected);
+  if (connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === key) return;
+  const slot = acquireRuntime(targetRoot, projectFolderSelected);
+  slot.leases++;
+  trimRuntimeSlots();
+  void slot.ready.catch(() => undefined).finally(() => {
+    slot.leases--;
+    trimRuntimeSlots();
+  });
+}
+
+function scheduleRuntimePrewarm(sources: ConversationSourceDescriptor[]): void {
+  if (runtimePrewarmTimer) clearTimeout(runtimePrewarmTimer);
+  const activeKey = connection ? runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) : undefined;
+  const targets = sources
+    .filter((source) => runtimeTargetKey(source.rootPath, source.kind === 'project') !== activeKey)
+    .slice(0, Math.max(0, MAX_RUNTIME_SLOTS - 1));
+  runtimePrewarmTimer = setTimeout(() => {
+    runtimePrewarmTimer = undefined;
+    void (async () => {
+      for (const source of targets) {
+        const slot = acquireRuntime(source.rootPath, source.kind === 'project');
+        slot.leases++;
+        try { await slot.ready; }
+        catch { /* A failed warm-up is retried on the real switch. */ }
+        finally {
+          slot.leases--;
+          trimRuntimeSlots();
+        }
+      }
+    })();
+  }, 600);
+  runtimePrewarmTimer.unref();
+}
+
+function startRuntime(projectRoot = defaultProjectRoot(), projectFolderSelectedOverride?: boolean): Promise<RuntimeConnection> {
+  if (runtimeReady) return runtimeReady;
+  const targetRoot = resolve(projectRoot);
+  const selected = projectFolderSelectedOverride ?? selectedProjectRoot() === targetRoot;
+  const slot = acquireRuntime(targetRoot, selected);
+  runtimeChild = slot.child;
+  runtimeReady = slot.ready.then((next) => {
+    if (runtimeChild === slot.child) {
+      connection = next;
+      touchRuntimeSlot(slot);
+    }
+    return next;
+  });
   return runtimeReady;
+}
+
+function runRuntimeTransition<T>(operation: () => Promise<T>): Promise<T> {
+  const transaction = runtimeTransition.then(operation, operation);
+  runtimeTransition = transaction.then(() => undefined, () => undefined);
+  return transaction;
+}
+
+async function switchRuntimeUnlocked(projectRoot: string, projectFolderSelected: boolean): Promise<RuntimeConnection> {
+  const targetRoot = resolve(projectRoot);
+  const key = runtimeTargetKey(targetRoot, projectFolderSelected);
+  if (connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === key) return connection;
+
+  const slot = acquireRuntime(targetRoot, projectFolderSelected);
+  slot.leases++;
+  try {
+    const next = await slot.ready;
+    runtimeChild = slot.child;
+    connection = next;
+    runtimeReady = slot.ready;
+    touchRuntimeSlot(slot);
+    return next;
+  } finally {
+    slot.leases--;
+    trimRuntimeSlots();
+  }
+}
+
+function switchRuntime(projectRoot: string, projectFolderSelected: boolean): Promise<RuntimeConnection> {
+  return runRuntimeTransition(() => switchRuntimeUnlocked(projectRoot, projectFolderSelected));
+}
+
+function detachedSettings(settings: DesktopSettings): DesktopSettings {
+  const remembered = settings.projectRoot ? rememberRecentProject(settings.projectRoot, settings) : settings;
+  const { projectRoot: _projectRoot, ...detached } = remembered;
+  return detached;
+}
+
+function projectTarget(value: unknown): { rootPath: string; name: string; additionalRoots: string[]; selected: boolean } {
+  const record = typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (record.kind === 'detached') {
+    return { rootPath: unboundProjectRoot(), name: '', additionalRoots: [], selected: false };
+  }
+  if (record.kind !== 'project') throw new Error(copy.projectSourceRequired);
+  const project = ensureProjectFolderDescriptor(record.rootPath as string);
+  const folders = projectSourceFolders(readSettings(), project.id, project.path);
+  return { rootPath: project.path, name: project.name, additionalRoots: folders.slice(1), selected: true };
+}
+
+function selectedProjectFolders(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Map(value.slice(0, 12).map((candidate) => {
+    const path = resolveProjectFolder(candidate);
+    return [path.toLocaleLowerCase(), path] as const;
+  })).values()];
+}
+
+function migrateConversationAttachments(
+  attachments: ChatAttachmentRef[] | undefined,
+  sourceRoot: string,
+  targetRoot: string,
+): ChatAttachmentRef[] | undefined {
+  if (!attachments?.length || resolve(sourceRoot) === resolve(targetRoot)) return attachments;
+  const sourceBase = resolve(sourceRoot);
+  const destinationRoot = join(resolve(targetRoot), '.openlab', 'attachments');
+  mkdirSync(destinationRoot, { recursive: true });
+  return attachments.map((attachment) => {
+    if (attachment.rootId && attachment.rootId !== 'project') return attachment;
+    const source = resolve(sourceBase, attachment.relativePath);
+    const sourceRelative = relative(sourceBase, source);
+    if (!sourceRelative || sourceRelative === '..' || sourceRelative.startsWith(`..${sep}`) || isAbsolute(sourceRelative)) {
+      throw new Error(copy.projectSourceMissing);
+    }
+    if (!existsSync(source) || !statSync(source).isFile()) throw new Error(copy.projectSourceMissing);
+    const safeName = basename(attachment.name).replace(/[^\p{L}\p{N}._-]/gu, '-');
+    const destination = join(destinationRoot, `${randomUUID()}-${safeName}`);
+    copyFileSync(source, destination);
+    return {
+      ...attachment,
+      rootId: 'project',
+      relativePath: relative(resolve(targetRoot), destination).replaceAll('\\', '/'),
+    };
+  });
+}
+
+async function startConversationTransaction(rawInput: unknown): Promise<DesktopConversationStartResult> {
+  const value = typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput)
+    ? rawInput as Record<string, unknown>
+    : {};
+  const message = typeof value.message === 'object' && value.message !== null && !Array.isArray(value.message)
+    ? value.message as ConversationStartInput['message']
+    : undefined;
+  if (!message) throw new Error(copy.conversationFirstMessageRequired);
+  const target = projectTarget(value.target);
+
+  return await runRuntimeTransition(async () => {
+    const previousConnection = connection ?? await startRuntime();
+    const sameRuntime = resolve(previousConnection.projectRoot) === resolve(target.rootPath)
+      && previousConnection.projectFolderSelected === target.selected;
+    const staged = sameRuntime ? undefined : acquireRuntime(target.rootPath, target.selected);
+    if (staged) staged.leases++;
+    let targetConnection = previousConnection;
+    try {
+      if (staged) targetConnection = await staged.ready;
+      const migratedAttachments = migrateConversationAttachments(message.attachments, previousConnection.projectRoot, target.rootPath);
+      const conversationInput: ConversationStartInput = {
+        ...(typeof value.title === 'string' ? { title: value.title } : {}),
+        ...(typeof value.leadAgentId === 'string' ? { leadAgentId: value.leadAgentId } : {}),
+        ...(Array.isArray(value.memberAgentIds) ? { memberAgentIds: value.memberAgentIds as string[] } : {}),
+        ...(value.temporary === true ? { temporary: true } : {}),
+        message: {
+          ...message,
+          ...(migratedAttachments ? { attachments: migratedAttachments } : {}),
+        },
+      };
+      const response = await runtimeRequestAt(targetConnection, '/api/conversations/start', {
+        method: 'POST',
+        body: JSON.stringify(conversationInput),
+      });
+      const started = await response.json() as ConversationStartResult;
+      const snapshot = await runtimeSnapshotAt(targetConnection);
+
+      const settings = readSettings();
+      writeSettings(target.selected ? rememberProject(target.rootPath, settings) : detachedSettings(settings));
+      if (staged) {
+        runtimeChild = staged.child;
+        connection = targetConnection;
+        runtimeReady = staged.ready;
+        touchRuntimeSlot(staged);
+      }
+      return { ...started, connection: targetConnection, snapshot };
+    } finally {
+      if (staged) {
+        staged.leases--;
+        trimRuntimeSlots();
+      }
+    }
+  });
+}
+
+async function activateConversationTransaction(rawInput: unknown): Promise<DesktopConversationActivateResult> {
+  const value = typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput)
+    ? rawInput as Partial<ConversationActivateInput>
+    : {};
+  if (typeof value.sessionId !== 'string' || typeof value.projectId !== 'string') throw new Error(copy.conversationLocationInvalid);
+  const source = conversationSources().find((candidate) => candidate.projectId === value.projectId);
+  if (!source) throw new Error(copy.conversationProjectMissing);
+  return await runRuntimeTransition(async () => {
+    const next = await switchRuntimeUnlocked(source.rootPath, source.kind === 'project');
+    let snapshot: BootstrapSnapshot;
+    if (value.activate !== false) {
+      const response = await runtimeRequestAt(next, `/api/sessions/${encodeURIComponent(value.sessionId!)}/activate`, { method: 'POST', body: '{}' });
+      snapshot = await response.json() as BootstrapSnapshot;
+    } else snapshot = await runtimeSnapshotAt(next);
+    const settings = readSettings();
+    writeSettings(source.kind === 'project' ? rememberProject(source.rootPath, settings) : detachedSettings(settings));
+    return { connection: next, snapshot };
+  });
 }
 
 function rendererEntry(): string {
@@ -259,12 +679,26 @@ function rendererEntry(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'renderer', 'dist', 'index.html');
 }
 
+function attachBrowserManager(window: BrowserWindow): void {
+  browserManager?.dispose();
+  browserManager = new WorktableBrowserManager({
+    window,
+    userData: app.getPath('userData'),
+    onChanged: (profiles, sessions) => {
+      void runtimeRequestAll('/api/browser/state', {
+        method: 'POST',
+        body: JSON.stringify({ profiles, sessions }),
+      });
+    },
+  });
+}
+
 async function createWindow(): Promise<void> {
   await startRuntime();
   const preload = join(dirname(fileURLToPath(import.meta.url)), 'preload.cjs');
   const preferences = currentInterfacePreferences();
   const chrome = windowChrome(preferences);
-  mainWindow = new BrowserWindow({
+  const appWindow = new BrowserWindow({
     width: 1480,
     height: 940,
     minWidth: 920,
@@ -285,31 +719,25 @@ async function createWindow(): Promise<void> {
       devTools: !app.isPackaged,
     },
   });
-  browserManager = new WorktableBrowserManager({
-    window: mainWindow,
-    userData: app.getPath('userData'),
-    onChanged: (profiles, sessions) => {
-      void runtimeRequest('/api/browser/state', {
-        method: 'POST',
-        body: JSON.stringify({ profiles, sessions }),
-      }).catch(() => undefined);
-    },
-  });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = appWindow;
+    attachBrowserManager(appWindow);
+  }
+  appWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//u.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  appWindow.webContents.on('will-navigate', (event, url) => {
     const allowed = process.env.OPENLAB_RENDERER_URL;
     if ((allowed && url.startsWith(allowed)) || url.startsWith('file:')) return;
     event.preventDefault();
   });
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+  appWindow.once('ready-to-show', () => {
+    appWindow.show();
     const capturePath = process.env.OPENLAB_CAPTURE_PATH;
-    if (capturePath) {
+    if (capturePath && appWindow === mainWindow) {
       setTimeout(() => {
-        void mainWindow?.webContents.capturePage().then((image) => {
+        void appWindow.webContents.capturePage().then((image) => {
           mkdirSync(dirname(resolve(capturePath)), { recursive: true });
           writeFileSync(resolve(capturePath), image.toPNG());
           app.quit();
@@ -317,13 +745,26 @@ async function createWindow(): Promise<void> {
       }, 1_500);
     }
   });
+  appWindow.on('closed', () => {
+    if (mainWindow !== appWindow) return;
+    mainWindow = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+    if (mainWindow) attachBrowserManager(mainWindow);
+    else {
+      browserManager?.dispose();
+      browserManager = undefined;
+    }
+  });
   const developmentUrl = process.env.OPENLAB_RENDERER_URL;
-  if (developmentUrl) await mainWindow.loadURL(developmentUrl);
-  else await mainWindow.loadFile(rendererEntry());
+  if (developmentUrl) await appWindow.loadURL(developmentUrl);
+  else await appWindow.loadFile(rendererEntry());
 }
 
 function registerIpc(): void {
   ipcMain.handle('runtime:get-connection', async () => connection ?? await startRuntime());
+  ipcMain.handle('runtime:invalidate-inactive', () => {
+    invalidateInactiveRuntimes();
+    return true;
+  });
   ipcMain.handle('interface:get-preferences', () => currentInterfacePreferences());
   ipcMain.handle('interface:update-preferences', (_event, raw: unknown): InterfacePreferencesUpdateResult => {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error(copy.invalidInterfacePreferences);
@@ -364,21 +805,22 @@ function registerIpc(): void {
     const value = raw.trim();
     saveDeepSeekKey(value);
     runtimeChild?.send?.({ type: 'provider-key', apiKey: value });
+    invalidateInactiveRuntimes();
     return { configured: true, protected: true };
   });
   ipcMain.handle('credential:save', async (_event, raw: unknown) => {
     if (typeof raw !== 'string' || !raw) throw new Error(copy.credentialEmpty);
     const id = saveMcpCredential(raw);
     await runtimeRequest('/api/credentials', { method: 'POST', body: JSON.stringify({ id, value: raw }) });
+    invalidateInactiveRuntimes();
     return id;
   });
   ipcMain.handle('project:choose', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { title: copy.chooseProject, properties: ['openDirectory', 'createDirectory'] });
     const selected = result.filePaths[0];
     if (result.canceled || !selected) return undefined;
-    writeSettings({ ...readSettings(), projectRoot: selected });
-    await stopRuntime();
-    const next = await startRuntime(selected);
+    const next = await switchRuntime(selected, true);
+    writeSettings(rememberProject(selected));
     return next;
   });
   ipcMain.handle('project:select-folder', async () => {
@@ -387,24 +829,105 @@ function registerIpc(): void {
     if (result.canceled || !selected) return undefined;
     return projectFolderSelection(selected);
   });
-  ipcMain.handle('project:activate', async (_event, input: unknown) => {
+  ipcMain.handle('project:create-draft', (_event, input: unknown) => {
     const value = typeof input === 'object' && input !== null && !Array.isArray(input) ? input as Record<string, unknown> : {};
-    const requestedFolders = Array.isArray(value.sourceFolders) ? value.sourceFolders : [value.rootPath];
-    const folders = [...new Map(requestedFolders.slice(0, 12).map((candidate) => {
-      const path = resolveProjectFolder(candidate);
-      return [path.toLocaleLowerCase(), path] as const;
-    })).values()];
+    const folders = selectedProjectFolders(value.sourceFolders);
     const selected = folders[0];
     if (!selected) throw new Error(copy.projectSourceRequired);
-    writeProjectManifest(selected, typeof value.name === 'string' ? value.name : '');
-    writeSettings({ ...readSettings(), projectRoot: selected });
-    await stopRuntime();
-    const next = await startRuntime(selected);
-    for (const path of folders.slice(1)) {
-      await runtimeRequest('/api/workspace/roots', {
-        method: 'POST', body: JSON.stringify({ path, access: 'trusted', confirmed: true }),
+    const manifest = writeProjectManifest(selected, typeof value.name === 'string' ? value.name : '');
+    writeSettings(rememberProjectSourceFolders(rememberRecentProject(selected), manifest.id, selected, folders));
+    prepareRuntime(selected, true);
+    return {
+      kind: 'project',
+      rootPath: selected,
+      name: manifest.name,
+      ...(folders.length > 1 ? { additionalRoots: folders.slice(1) } : {}),
+    } satisfies DesktopConversationStartInput['target'];
+  });
+  ipcMain.handle('project:activate', async (_event, input: unknown) => {
+    const value = typeof input === 'object' && input !== null && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const folders = selectedProjectFolders(Array.isArray(value.sourceFolders) ? value.sourceFolders : [value.rootPath]);
+    const selected = folders[0];
+    if (!selected) throw new Error(copy.projectSourceRequired);
+    const manifest = writeProjectManifest(selected, typeof value.name === 'string' ? value.name : '');
+    writeSettings(rememberProjectSourceFolders(rememberProject(selected), manifest.id, selected, folders));
+    const active = connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === runtimeTargetKey(selected, true);
+    if (active) {
+      await runtimeRequest('/api/project/source-folders', {
+        method: 'PUT', body: JSON.stringify({ paths: folders.slice(1) }),
       });
+    } else invalidateRuntimeTarget(selected, true);
+    const next = await switchRuntime(selected, true);
+    return next;
+  });
+  ipcMain.handle('project:list', () => recentProjects());
+  ipcMain.handle('project:rename', async (_event, rawInput: unknown) => {
+    const target = resolveProjectActionTarget(rawInput);
+    const value = rawInput as { name?: unknown };
+    const manifest = writeProjectManifest(target.rootPath, value.name as string);
+    if (connection && resolve(connection.projectRoot).toLocaleLowerCase() === target.rootPath.toLocaleLowerCase()) {
+      await runtimeRequest('/api/project/rename', { method: 'POST', body: JSON.stringify({ name: manifest.name }) });
+    } else invalidateRuntimeTarget(target.rootPath, true);
+    return { ...target, name: manifest.name } satisfies ConversationSourceDescriptor;
+  });
+  ipcMain.handle('project:update-folders', async (_event, rawInput: unknown) => {
+    const target = resolveProjectActionTarget(rawInput);
+    const value = rawInput as { sourceFolders?: unknown };
+    const requested = selectedProjectFolders(value.sourceFolders);
+    const folders = [target.rootPath, ...requested.filter((path) => path.toLocaleLowerCase() !== target.rootPath.toLocaleLowerCase())].slice(0, 12);
+    const settings = rememberProjectSourceFolders(readSettings(), target.projectId, target.rootPath, folders);
+    writeSettings(settings);
+    const active = connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === runtimeTargetKey(target.rootPath, true);
+    if (active) {
+      await runtimeRequest('/api/project/source-folders', {
+        method: 'PUT', body: JSON.stringify({ paths: folders.slice(1) }),
+      });
+    } else invalidateRuntimeTarget(target.rootPath, true);
+    return {
+      kind: 'project', projectId: target.projectId, rootPath: target.rootPath, name: target.name,
+      ...(folders.length > 1 ? { additionalRoots: folders.slice(1) } : {}),
+    } satisfies ConversationSourceDescriptor;
+  });
+  ipcMain.handle('project:archive-conversations', async (_event, rawInput: unknown) => {
+    const target = resolveProjectActionTarget(rawInput);
+    return await withProjectRuntime(target.rootPath, async (runtimeTarget) => {
+      const response = await runtimeRequestAt(runtimeTarget, '/api/sessions/archive-project', { method: 'POST', body: '{}' });
+      return await response.json() as { archivedSessionIds: string[] };
+    });
+  });
+  ipcMain.handle('project:remove', async (_event, rawInput: unknown) => {
+    const target = resolveProjectActionTarget(rawInput);
+    const settings = readSettings();
+    const targetKey = target.rootPath.toLocaleLowerCase();
+    const recentProjectRoots = (settings.recentProjectRoots ?? []).filter((candidate) => resolve(candidate).toLocaleLowerCase() !== targetKey);
+    const active = connection && resolve(connection.projectRoot).toLocaleLowerCase() === targetKey;
+    const projectRoot = settings.projectRoot && resolve(settings.projectRoot).toLocaleLowerCase() !== targetKey ? settings.projectRoot : undefined;
+    const nextSettings: DesktopSettings = { ...forgetProjectSourceFolders(settings, target.projectId), recentProjectRoots, ...(projectRoot ? { projectRoot } : {}) };
+    if (!projectRoot) delete nextSettings.projectRoot;
+    if (!active) {
+      invalidateRuntimeTarget(target.rootPath, true);
+      writeSettings(nextSettings);
+      return { removed: true };
     }
+    const next = await switchRuntime(unboundProjectRoot(), false);
+    invalidateRuntimeTarget(target.rootPath, true);
+    writeSettings(nextSettings);
+    return { removed: true, connection: next };
+  });
+  ipcMain.handle('conversation:sources', () => {
+    const sources = conversationSources();
+    scheduleRuntimePrewarm(sources);
+    return sources;
+  });
+  ipcMain.handle('conversation:prepare-target', (_event, rawTarget: unknown) => {
+    const target = projectTarget(rawTarget);
+    prepareRuntime(target.rootPath, target.selected);
+    return true;
+  });
+  ipcMain.handle('project:activate-existing', async (_event, rawRootPath: unknown) => {
+    const selected = resolveProjectFolder(rawRootPath);
+    const next = await switchRuntime(selected, true);
+    writeSettings(rememberProject(selected));
     return next;
   });
   ipcMain.handle('project:context', async () => {
@@ -417,10 +940,13 @@ function registerIpc(): void {
     };
   });
   ipcMain.handle('project:clear', async () => {
-    const { projectRoot: _projectRoot, ...settings } = readSettings();
+    const currentSettings = readSettings();
+    const selected = selectedProjectRoot();
+    const remembered = selected ? rememberProject(selected, currentSettings) : currentSettings;
+    const { projectRoot: _projectRoot, ...settings } = remembered;
+    const next = await switchRuntime(unboundProjectRoot(), false);
     writeSettings(settings);
-    await stopRuntime();
-    return await startRuntime(defaultProjectRoot());
+    return next;
   });
   ipcMain.handle('project:open-folder', async () => {
     const target = connection ?? await startRuntime();
@@ -482,7 +1008,7 @@ function registerIpc(): void {
       copyFileSync(source, destination);
       const sha256 = createHash('sha256').update(readFileSync(destination)).digest('hex');
       return {
-        id: randomUUID(), name: basename(source),
+        id: randomUUID(), name: basename(source), rootId: 'project',
         relativePath: relative(target.projectRoot, destination).replaceAll('\\', '/'),
         sha256, size, ...(mediaType(source) ? { mediaType: mediaType(source) } : {}),
       };
@@ -556,6 +1082,19 @@ function registerIpc(): void {
     writeFileSync(result.filePath, binary);
     return true;
   });
+  ipcMain.handle('project:open-root', async (_event, rawRootPath: unknown) => {
+    const rootPath = resolveProjectFolder(rawRootPath);
+    const error = await shell.openPath(rootPath);
+    if (error) throw new Error(error);
+    return true;
+  });
+  ipcMain.handle('conversation:start', async (_event, input: unknown) => await startConversationTransaction(input));
+  ipcMain.handle('conversation:activate', async (_event, input: unknown) => await activateConversationTransaction(input));
+  ipcMain.handle('clipboard:write-text', (_event, value: unknown) => {
+    if (typeof value !== 'string' || value.length > 2_000_000) throw new Error('Invalid clipboard text');
+    clipboard.writeText(value);
+    return true;
+  });
   ipcMain.handle('shell:open-external', async (_event, url: unknown) => {
     if (typeof url !== 'string' || !/^https:\/\//u.test(url) || url.length > 4_096) throw new Error(copy.httpsOnly);
     await shell.openExternal(url);
@@ -615,6 +1154,7 @@ function registerIpc(): void {
       projectId: input.projectId as string,
       instanceId: input.instanceId as string,
       paneId: input.paneId as string,
+      ...(input.surface === 'workspace_preview' || input.surface === 'worktable' ? { surface: input.surface } : {}),
       url: input.url as string,
       confirmed: input.confirmed === true,
     });
@@ -624,6 +1164,12 @@ function registerIpc(): void {
     const input = raw as { sessionId?: unknown; url?: unknown; confirmed?: unknown };
     if (typeof input.sessionId !== 'string' || typeof input.url !== 'string') throw new Error('Browser navigation input is invalid');
     return await browserManager.navigate(input.sessionId, input.url, input.confirmed === true);
+  });
+  ipcMain.handle('browser:history', async (_event, raw: unknown) => {
+    if (!browserManager || !raw || typeof raw !== 'object') throw new Error('Browser host is unavailable');
+    const input = raw as { sessionId?: unknown; action?: unknown };
+    if (typeof input.sessionId !== 'string' || !['back', 'forward', 'reload'].includes(String(input.action))) throw new Error('Browser history input is invalid');
+    return await browserManager.history(input.sessionId, input.action as 'back' | 'forward' | 'reload');
   });
   ipcMain.handle('browser:observe', async (_event, sessionId: unknown) => {
     if (!browserManager || typeof sessionId !== 'string') throw new Error('Browser session is invalid');
@@ -697,10 +1243,70 @@ function registerIpc(): void {
     if (!browserManager || typeof sessionId !== 'string') throw new Error('Browser session is invalid');
     return browserManager.close(sessionId);
   });
-  ipcMain.on('window:minimize', () => mainWindow?.minimize());
-  ipcMain.on('window:maximize', () => mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize());
-  ipcMain.on('window:close', () => mainWindow?.close());
+  ipcMain.handle('window:new', async () => { await createWindow(); return true; });
+  ipcMain.on('window:minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
+  ipcMain.on('window:maximize', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (window?.isMaximized()) window.unmaximize(); else window?.maximize();
+  });
+  ipcMain.on('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+  ipcMain.on('edit:command', (event, raw: unknown) => {
+    if (typeof raw !== 'string' || !['undo', 'redo', 'cut', 'copy', 'paste', 'delete', 'selectAll'].includes(raw)) return;
+    const contents = event.sender;
+    if (raw === 'undo') contents.undo();
+    else if (raw === 'redo') contents.redo();
+    else if (raw === 'cut') contents.cut();
+    else if (raw === 'copy') contents.copy();
+    else if (raw === 'paste') contents.paste();
+    else if (raw === 'delete') contents.delete();
+    else contents.selectAll();
+  });
+  ipcMain.on('view:command', (event, raw: unknown) => {
+    if (typeof raw !== 'string' || !['zoom-in', 'zoom-out', 'reset-zoom', 'toggle-fullscreen', 'reload'].includes(raw)) return;
+    const contents = event.sender;
+    if (raw === 'reload') {
+      contents.reload();
+      return;
+    }
+    if (raw === 'toggle-fullscreen') {
+      const window = BrowserWindow.fromWebContents(contents);
+      if (window) window.setFullScreen(!window.isFullScreen());
+      return;
+    }
+    const next = raw === 'reset-zoom'
+      ? 1
+      : Math.min(3, Math.max(.5, Math.round((contents.getZoomFactor() + (raw === 'zoom-in' ? .1 : -.1)) * 10) / 10));
+    contents.setZoomFactor(next);
+  });
+  ipcMain.on('view:find-in-page', (event, raw: unknown) => {
+    const query = typeof raw === 'string' ? raw.trim().slice(0, 500) : '';
+    if (query) event.sender.findInPage(query);
+    else event.sender.stopFindInPage('clearSelection');
+  });
+  ipcMain.handle('view:open-terminal', () => {
+    const target = selectedProjectRoot() ?? process.cwd();
+    const terminal = spawn('powershell.exe', ['-NoLogo', '-NoExit'], {
+      cwd: target,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    });
+    terminal.unref();
+    return true;
+  });
 }
+
+const ownsSingleInstance = app.requestSingleInstanceLock();
+
+if (!ownsSingleInstance) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
 
 app.whenReady().then(async () => {
   browserBroker = new BrowserAutomationBroker(() => browserManager);
@@ -708,6 +1314,14 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const headers = details.responseHeaders ?? {};
+    // Generated-app assets carry a per-app CSP assembled by Runtime from the
+    // user-approved network domain list. Replacing it with the renderer CSP
+    // would silently disable that policy (and its sandbox directive).
+    const generatedApp = /^http:\/\/127\.0\.0\.1:\d+\/generated-apps\//u.test(details.url);
+    if (generatedApp) {
+      callback({ responseHeaders: headers });
+      return;
+    }
     const pluginPanel = details.resourceType === 'subFrame' && /^http:\/\/127\.0\.0\.1:\d+\/plugin-panels\//u.test(details.url);
     headers['Content-Security-Policy'] = [pluginPanel
       ? "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*"
@@ -740,15 +1354,25 @@ app.on('window-all-closed', () => app.quit());
 app.on('before-quit', (event) => {
   browserManager?.dispose();
   browserManager = undefined;
-  if (!runtimeChild) {
+  if (runtimePrewarmTimer) {
+    clearTimeout(runtimePrewarmTimer);
+    runtimePrewarmTimer = undefined;
+  }
+  if (runtimeChildren.size === 0) {
     void browserBroker?.close();
     return;
   }
   event.preventDefault();
-  void stopRuntime().finally(async () => {
+  const children = [...runtimeChildren];
+  runtimeChild = undefined;
+  connection = undefined;
+  runtimeReady = undefined;
+  runtimeSlots.clear();
+  void Promise.all(children.map((child) => stopRuntimeChild(child))).finally(async () => {
     await browserBroker?.close();
     browserBroker = undefined;
     browserBrokerConnection = undefined;
     app.exit(0);
   });
 });
+}

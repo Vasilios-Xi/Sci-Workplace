@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  AtSign, Check, ChevronDown, FolderOpen, FolderPlus, FolderX, GitBranch, GripHorizontal, Link2, MessageSquareQuote, Monitor,
-  Paperclip, Plus, Search, Send, Shield, Sparkles, Square, WandSparkles, X,
+  ArrowUp, AtSign, Check, FolderOpen, GripHorizontal, Link2, MessageSquareQuote,
+  Paperclip, Pencil, Plus, Sparkles, Square, WandSparkles, X,
 } from 'lucide-react';
 import type { AgentDefinition, ChatAttachmentRef, ModelDescriptor, PermissionMode, ReasoningEffort, ResearchObject, SkillDescriptor } from '@openlab/protocol';
 import { hanaZhCN as copy } from '../i18n/zh-CN.js';
 import { clampComposerHeight } from '../lib/chat-layout.js';
 import { useFloatingPosition } from '../lib/floating-position.js';
 import { ModelPicker } from './ModelPicker.js';
+import { PermissionPicker } from './PermissionPicker.js';
+import type { PermissionPickerOption } from './PermissionPicker.js';
 import { ReasoningPicker } from './ReasoningPicker.js';
 
 interface QuotedNodeRef { id: string; label: string }
@@ -26,6 +28,13 @@ interface ComposerTransientState {
 
 const transientSessions = new Map<string, ComposerTransientState>();
 const draftKey = (sessionKey: string) => `openlab.composer-draft.v1:${encodeURIComponent(sessionKey)}`;
+const isDraftSessionKey = (sessionKey: string | undefined): boolean => Boolean(sessionKey?.includes(':draft:'));
+const permissionOptions: PermissionPickerOption[] = [
+  { value: 'auto', ...copy.composer.permissionModes.auto },
+  { value: 'trusted', ...copy.composer.permissionModes.trusted },
+  { value: 'ask', ...copy.composer.permissionModes.ask },
+  { value: 'read_only', ...copy.composer.permissionModes.readOnly },
+];
 
 function createTransientState(sessionKey: string | undefined, model: string): ComposerTransientState {
   const stored = sessionKey ? transientSessions.get(sessionKey) : undefined;
@@ -34,7 +43,7 @@ function createTransientState(sessionKey: string | undefined, model: string): Co
   if (sessionKey) {
     try { text = sessionStorage.getItem(draftKey(sessionKey)) ?? ''; } catch { /* Draft persistence is optional. */ }
   }
-  return { text, model, reasoningEffort: 'high', permissionMode: 'ask', selectedSkills: [], attachments: [], researchObjectIds: [], mentionedAgentIds: [] };
+  return { text, model, reasoningEffort: 'high', permissionMode: 'auto', selectedSkills: [], attachments: [], researchObjectIds: [], mentionedAgentIds: [] };
 }
 
 function persistTransientState(sessionKey: string, state: ComposerTransientState) {
@@ -50,6 +59,7 @@ function persistTransientState(sessionKey: string, state: ComposerTransientState
 interface ComposerProps {
   testId?: string;
   sessionKey?: string;
+  preferredModel?: string;
   composerHeight?: number | null;
   onComposerHeightChange?(height: number | null): void;
   models: ModelDescriptor[];
@@ -57,16 +67,15 @@ interface ComposerProps {
   agents: AgentDefinition[];
   researchObjects: ResearchObject[];
   running: boolean;
-  projectContext?: { name: string; location: string; gitBranch?: string } | undefined;
-  onOpenProjectContext?(): void;
-  onCreateProject?(): void;
-  onLeaveProject?(): Promise<void>;
   injectedAttachments: ChatAttachmentRef[];
   quotedNodes: QuotedNodeRef[];
+  editingMessage?: { requestId: string; nodeId: string; text: string } | undefined;
   onRemoveInjectedAttachment(id: string): void;
   onRemoveQuotedNode(id: string): void;
   onClearInjected(): void;
   onOpenWorkspace(): void;
+  onCancelEditingMessage(): void;
+  onFinishEditingMessage(): void;
   onSend(text: string, options: {
     model?: string;
     thinking: 'enabled' | 'disabled';
@@ -82,7 +91,9 @@ interface ComposerProps {
 }
 
 export function Composer(props: ComposerProps) {
-  const fallbackModel = props.models[0]?.id ?? 'deepseek::deepseek-v4-pro';
+  const fallbackModel = (props.preferredModel && props.models.some((item) => item.id === props.preferredModel)
+    ? props.preferredModel
+    : props.models[0]?.id) ?? 'deepseek::deepseek-v4-pro';
   const initial = useRef<ComposerTransientState>(createTransientState(props.sessionKey, fallbackModel)).current;
   const [loadedSessionKey, setLoadedSessionKey] = useState(props.sessionKey);
   const [text, setText] = useState(initial.text);
@@ -95,23 +106,45 @@ export function Composer(props: ComposerProps) {
   const [mentionedAgentIds, setMentionedAgentIds] = useState<string[]>(initial.mentionedAgentIds);
   const [busy, setBusy] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
-  const [projectSearch, setProjectSearch] = useState('');
   const [dragging, setDragging] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const composer = useRef<HTMLDivElement>(null);
   const plusTrigger = useRef<HTMLButtonElement>(null);
   const plusMenu = useRef<HTMLDivElement>(null);
-  const projectTrigger = useRef<HTMLButtonElement>(null);
-  const projectMenu = useRef<HTMLDivElement>(null);
+  const appliedEditRequest = useRef<string | undefined>(undefined);
+  const editRestore = useRef<{ requestId: string; text: string } | undefined>(undefined);
+  const draftPromotion = useRef<string | undefined>(undefined);
   const currentSession = useRef(props.sessionKey);
   currentSession.current = props.sessionKey;
   const plusMenuStyle = useFloatingPosition({ open: plusOpen, anchorRef: plusTrigger, surfaceRef: plusMenu, placement: 'top-start' });
-  const projectMenuStyle = useFloatingPosition({ open: projectMenuOpen, anchorRef: projectTrigger, surfaceRef: projectMenu, placement: 'top-start' });
+
+  useEffect(() => {
+    const edit = props.editingMessage;
+    if (!edit || appliedEditRequest.current === edit.requestId) return;
+    if (!editRestore.current) editRestore.current = { requestId: edit.requestId, text };
+    appliedEditRequest.current = edit.requestId;
+    setText(edit.text);
+    window.requestAnimationFrame(() => {
+      textarea.current?.focus();
+      textarea.current?.setSelectionRange(edit.text.length, edit.text.length);
+    });
+  }, [props.editingMessage, text]);
+
+  useEffect(() => {
+    if (props.editingMessage) return;
+    appliedEditRequest.current = undefined;
+    editRestore.current = undefined;
+  }, [props.editingMessage]);
 
   useEffect(() => {
     if (!props.sessionKey || props.sessionKey === loadedSessionKey) return;
     if (loadedSessionKey) persistTransientState(loadedSessionKey, { text, model, reasoningEffort, permissionMode, selectedSkills, attachments, researchObjectIds, mentionedAgentIds });
+    if (isDraftSessionKey(loadedSessionKey) && draftPromotion.current === loadedSessionKey) {
+      persistTransientState(props.sessionKey, { text, model, reasoningEffort, permissionMode, selectedSkills, attachments, researchObjectIds, mentionedAgentIds });
+      draftPromotion.current = undefined;
+      setLoadedSessionKey(props.sessionKey);
+      return;
+    }
     const next = createTransientState(props.sessionKey, fallbackModel);
     setText(next.text);
     setModel(next.model);
@@ -122,8 +155,6 @@ export function Composer(props: ComposerProps) {
     setResearchObjectIds(next.researchObjectIds);
     setMentionedAgentIds(next.mentionedAgentIds);
     setPlusOpen(false);
-    setProjectMenuOpen(false);
-    setProjectSearch('');
     setLoadedSessionKey(props.sessionKey);
   }, [attachments, fallbackModel, loadedSessionKey, mentionedAgentIds, model, permissionMode, props.sessionKey, reasoningEffort, researchObjectIds, selectedSkills, text]);
 
@@ -179,25 +210,6 @@ export function Composer(props: ComposerProps) {
     };
   }, [plusOpen]);
 
-  useEffect(() => {
-    if (!projectMenuOpen) return;
-    const outside = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!projectMenu.current?.contains(target) && !projectTrigger.current?.contains(target)) setProjectMenuOpen(false);
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setProjectMenuOpen(false);
-      requestAnimationFrame(() => projectTrigger.current?.focus());
-    };
-    document.addEventListener('pointerdown', outside);
-    window.addEventListener('keydown', escape);
-    return () => {
-      document.removeEventListener('pointerdown', outside);
-      window.removeEventListener('keydown', escape);
-    };
-  }, [projectMenuOpen]);
-
   const allAttachments = useMemo(() => {
     const values = [...attachments, ...props.injectedAttachments];
     return [...new Map(values.map((item) => [item.id, item])).values()];
@@ -207,6 +219,7 @@ export function Composer(props: ComposerProps) {
   const submit = async () => {
     if (!canSend) return;
     const submittedSession = loadedSessionKey;
+    if (submittedSession && isDraftSessionKey(submittedSession)) draftPromotion.current = submittedSession;
     setBusy(true);
     try {
       await props.onSend(text.trim(), {
@@ -220,13 +233,21 @@ export function Composer(props: ComposerProps) {
         ...(mentionedAgentIds.length ? { mentionedAgentIds } : {}),
         ...(props.quotedNodes.length ? { quotedNodeIds: props.quotedNodes.map((item) => item.id) } : {}),
       });
-      if (!submittedSession || currentSession.current === submittedSession) {
+      if (!submittedSession || currentSession.current === submittedSession || (isDraftSessionKey(submittedSession) && currentSession.current !== submittedSession)) {
         setText(''); setSelectedSkills([]); setAttachments([]); setResearchObjectIds([]); setMentionedAgentIds([]);
-      } else {
+      }
+      if (submittedSession && currentSession.current !== submittedSession) {
         transientSessions.delete(submittedSession);
         try { sessionStorage.removeItem(draftKey(submittedSession)); } catch { /* Optional persistence. */ }
       }
       props.onClearInjected();
+      if (props.editingMessage) {
+        editRestore.current = undefined;
+        props.onFinishEditingMessage();
+      }
+    } catch (cause) {
+      if (draftPromotion.current === submittedSession) draftPromotion.current = undefined;
+      throw cause;
     } finally { setBusy(false); }
   };
 
@@ -252,48 +273,34 @@ export function Composer(props: ComposerProps) {
     window.addEventListener('pointercancel', finish, { once: true });
   };
 
-  const plusSurface = plusOpen && createPortal(<div ref={plusMenu} className="composer-plus__menu floating-composer-menu" style={plusMenuStyle} data-testid="composer-plus-menu">
-    <button onClick={() => void chooseAttachments()}><Paperclip size={15}/><span><strong>{copy.composer.uploadFile}</strong><small>{copy.composer.copyToConversation}</small></span></button>
-    <button onClick={() => { props.onOpenWorkspace(); setPlusOpen(false); }}><FolderOpen size={15}/><span><strong>{copy.composer.referenceWorkspace}</strong><small>{copy.composer.browseAuthorizedFiles}</small></span></button>
+  const enabledSkills = props.skills.filter((skill) => skill.enabled);
+  const cancelEditingMessage = () => {
+    const previousText = editRestore.current?.text ?? '';
+    editRestore.current = undefined;
+    appliedEditRequest.current = undefined;
+    setText(previousText);
+    props.onCancelEditingMessage();
+    window.requestAnimationFrame(() => {
+      textarea.current?.focus();
+      textarea.current?.setSelectionRange(previousText.length, previousText.length);
+    });
+  };
+  const plusSurface = plusOpen && createPortal(<div ref={plusMenu} className="composer-plus__menu floating-composer-menu" style={plusMenuStyle} data-testid="composer-plus-menu" role="menu" aria-label={copy.composer.addContent}>
+    <button type="button" role="menuitem" onClick={() => void chooseAttachments()}><Paperclip size={15}/><span><strong>{copy.composer.uploadFile}</strong><small>{copy.composer.copyToConversation}</small></span></button>
+    <button type="button" role="menuitem" onClick={() => { props.onOpenWorkspace(); setPlusOpen(false); }}><FolderOpen size={15}/><span><strong>{copy.composer.referenceWorkspace}</strong><small>{copy.composer.browseAuthorizedFiles}</small></span></button>
     <label><AtSign size={15}/><span><strong>{copy.composer.mentionAgent}</strong><small>{copy.composer.addExecutor}</small></span><select value="" onChange={(event) => { if (event.target.value) setMentionedAgentIds((items) => [...new Set([...items, event.target.value])]); setPlusOpen(false); }}><option value="">{copy.composer.select}</option>{props.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
     <label><Link2 size={15}/><span><strong>{copy.composer.referenceResearch}</strong><small>{copy.composer.relateEvidence}</small></span><select value="" onChange={(event) => { if (event.target.value) setResearchObjectIds((items) => [...new Set([...items, event.target.value])]); setPlusOpen(false); }}><option value="">{copy.composer.select}</option>{props.researchObjects.map((object) => <option key={object.id} value={object.id}>{object.title}</option>)}</select></label>
-  </div>, document.body);
-
-  const normalizedProjectSearch = projectSearch.trim().toLocaleLowerCase();
-  const projectMatches = !normalizedProjectSearch || props.projectContext?.name.toLocaleLowerCase().includes(normalizedProjectSearch);
-  const showProjectContext = Boolean(props.projectContext || props.onCreateProject);
-  const projectSurface = props.projectContext && projectMenuOpen && createPortal(<div
-    ref={projectMenu}
-    className="composer-project-menu"
-    style={projectMenuStyle}
-    data-testid="composer-project-menu"
-    role="menu"
-    aria-label={copy.composer.chooseProject}
-  >
-    <label className="composer-project-menu__search"><Search size={15}/><input autoFocus value={projectSearch} placeholder={copy.composer.searchProjects} aria-label={copy.composer.searchProjects} onChange={(event) => setProjectSearch(event.target.value)}/></label>
-    <div className="composer-project-menu__section">
-      {projectMatches ? <button type="button" className="composer-project-menu__project is-active" role="menuitem" onClick={() => setProjectMenuOpen(false)}>
-        <FolderOpen size={17}/><span><strong>{props.projectContext.name}</strong><small>{copy.composer.currentProject}</small></span><Check size={15}/>
-      </button> : <p>{copy.composer.noProjectMatches}</p>}
-    </div>
-    <div className="composer-project-menu__actions">
-      {props.onOpenProjectContext && <button type="button" role="menuitem" onClick={() => { setProjectMenuOpen(false); props.onOpenProjectContext?.(); }}><FolderOpen size={17}/><span>{copy.composer.openProject}</span></button>}
-      {props.onCreateProject && <button type="button" role="menuitem" onClick={() => { setProjectMenuOpen(false); props.onCreateProject?.(); }}><FolderPlus size={17}/><span>{copy.composer.newProject}</span></button>}
-      {props.onLeaveProject && <button type="button" role="menuitem" onClick={() => { setProjectMenuOpen(false); void props.onLeaveProject?.(); }}><FolderX size={17}/><span>{copy.composer.workWithoutProject}</span></button>}
-    </div>
-  </div>, document.body);
-
-  return <div className={`composer-wrap ${showProjectContext ? 'has-project-context' : ''}`}>
-    {showProjectContext && <div className={`composer-project-context ${props.projectContext ? '' : 'is-empty'}`} data-testid="composer-project-context" aria-label={copy.composer.projectContext}>
-      <button ref={projectTrigger} type="button" title={props.projectContext ? copy.composer.chooseProject : copy.composer.newProject} aria-haspopup={props.projectContext ? 'menu' : undefined} aria-expanded={props.projectContext ? projectMenuOpen : undefined} onClick={() => {
+    <div className="composer-plus__section-title"><Sparkles size={14}/><span>{copy.composer.skill}</span></div>
+    {enabledSkills.length ? enabledSkills.map((skill) => {
+      const selected = selectedSkills.includes(skill.id);
+      return <button key={skill.id} type="button" role="menuitemcheckbox" aria-checked={selected} className={`composer-plus__skill ${selected ? 'is-selected' : ''}`} onClick={() => {
+        setSelectedSkills((items) => selected ? items.filter((id) => id !== skill.id) : [...items, skill.id]);
         setPlusOpen(false);
-        if (!props.projectContext) { props.onCreateProject?.(); return; }
-        setProjectSearch('');
-        setProjectMenuOpen((value) => !value);
-      }}>{props.projectContext ? <FolderOpen size={16}/> : <FolderPlus size={16}/>}<strong>{props.projectContext?.name ?? copy.composer.noWorkspace}</strong>{props.projectContext && <ChevronDown size={13}/>}</button>{projectSurface}
-      {props.projectContext && <span><Monitor size={15}/><strong>{props.projectContext.location}</strong></span>}
-      {props.projectContext?.gitBranch && <span><GitBranch size={15}/><strong>{props.projectContext.gitBranch}</strong></span>}
-    </div>}
+      }}><WandSparkles size={15}/><span><strong>{skill.name}</strong><small>{skill.description}</small></span>{selected && <Check size={14}/>}</button>;
+    }) : <div className="composer-plus__empty">{copy.composer.noAvailableSkills}</div>}
+  </div>, document.body);
+
+  return <div className="composer-wrap">
     <div ref={composer} className={`composer ${props.running ? 'is-running' : ''} ${dragging ? 'is-dragging' : ''} ${props.composerHeight ? 'has-custom-height' : ''}`} style={props.composerHeight ? { height: props.composerHeight } : undefined} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => {
       event.preventDefault(); setDragging(false);
       const files = [...event.dataTransfer.files].slice(0, 10);
@@ -305,7 +312,8 @@ export function Composer(props: ComposerProps) {
         if (event.key === 'Home') props.onComposerHeightChange?.(null);
         else props.onComposerHeightChange?.(clampComposerHeight((props.composerHeight ?? composer.current?.getBoundingClientRect().height ?? 112) + (event.key === 'ArrowUp' ? 8 : -8)));
       }}><GripHorizontal size={14}/></div>}
-      {(selectedSkills.length > 0 || allAttachments.length > 0 || researchObjectIds.length > 0 || mentionedAgentIds.length > 0 || props.quotedNodes.length > 0) && <div className="composer-chips">
+      {(Boolean(props.editingMessage) || selectedSkills.length > 0 || allAttachments.length > 0 || researchObjectIds.length > 0 || mentionedAgentIds.length > 0 || props.quotedNodes.length > 0) && <div className="composer-chips">
+        {props.editingMessage && <button type="button" data-testid="composer-editing-message" title={copy.composer.cancelEditingMessage} onClick={cancelEditingMessage}><Pencil size={12}/>{copy.composer.editingMessage}<X size={11}/></button>}
         {allAttachments.map((attachment) => <button key={attachment.id} onClick={() => props.injectedAttachments.some((item) => item.id === attachment.id) ? props.onRemoveInjectedAttachment(attachment.id) : setAttachments((items) => items.filter((item) => item.id !== attachment.id))}><Paperclip size={12}/>{attachment.name}<X size={11}/></button>)}
         {props.quotedNodes.map((item) => <button key={item.id} onClick={() => props.onRemoveQuotedNode(item.id)}><MessageSquareQuote size={12}/>{item.label}<X size={11}/></button>)}
         {researchObjectIds.map((id) => <button key={id} onClick={() => setResearchObjectIds((items) => items.filter((item) => item !== id))}><Link2 size={12}/>{props.researchObjects.find((object) => object.id === id)?.title ?? id}<X size={11}/></button>)}
@@ -314,15 +322,14 @@ export function Composer(props: ComposerProps) {
       </div>}
       <textarea ref={textarea} data-testid={props.testId ?? 'composer-input'} value={text} onChange={(event) => setText(event.target.value)} placeholder={copy.composer.placeholder} rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }}/>
       <div className="composer__toolbar">
-        <div className="composer__tools">
-          <div className="composer-plus"><button ref={plusTrigger} className={plusOpen ? 'is-active' : ''} title={copy.composer.addContent} aria-haspopup="menu" aria-expanded={plusOpen} onClick={() => setPlusOpen((value) => !value)}><Plus size={18}/></button>{plusSurface}</div>
-          <label className="composer-control skill"><Sparkles size={14}/><select aria-label={copy.composer.loadSkill} value="" onChange={(event) => event.target.value && setSelectedSkills((items) => [...new Set([...items, event.target.value])])}><option value="">{copy.composer.skill}</option>{props.skills.filter((skill) => skill.enabled).map((skill) => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select><ChevronDown size={12}/></label>
+        <div className="composer__tools" data-testid="composer-tools">
+          <div className="composer-plus"><button ref={plusTrigger} data-testid="composer-plus-trigger" className={plusOpen ? 'is-active' : ''} title={copy.composer.addContent} aria-haspopup="menu" aria-expanded={plusOpen} onClick={() => setPlusOpen((value) => !value)}><Plus size={18}/></button>{plusSurface}</div>
+          <PermissionPicker value={permissionMode} label={copy.composer.permissionMode} options={permissionOptions} onChange={setPermissionMode} onOpen={() => setPlusOpen(false)}/>
         </div>
-        <div className="composer__options">
+        <div className="composer__options" data-testid="composer-options">
           <ReasoningPicker value={reasoningEffort} label={copy.composer.reasoning} options={reasoningOptions} onChange={setReasoningEffort} onOpen={() => setPlusOpen(false)}/>
           <ModelPicker models={props.models} value={model} label={copy.composer.model} onChange={setModel} onOpen={() => setPlusOpen(false)}/>
-          <label className="composer-control permission"><Shield size={14}/><select aria-label={copy.composer.permissionMode} value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as PermissionMode)}><option value="ask">{copy.composer.ask}</option><option value="read_only">{copy.composer.readOnly}</option><option value="trusted">{copy.composer.trusted}</option></select><ChevronDown size={12}/></label>
-          {props.running ? <button data-testid="cancel-turn" className="send-button stop" title={copy.composer.stop} onClick={() => void props.onCancel()}><Square size={14} fill="currentColor"/></button> : <button data-testid="send-message" className="send-button" title={copy.composer.send} disabled={!canSend} onClick={() => void submit()}><Send size={16}/></button>}
+          {props.running ? <button data-testid="cancel-turn" className="send-button stop" title={copy.composer.stop} onClick={() => void props.onCancel()}><Square size={13} fill="currentColor"/></button> : <button data-testid="send-message" className="send-button" title={copy.composer.send} disabled={!canSend} onClick={() => void submit()}><ArrowUp size={14}/></button>}
         </div>
       </div>
       {dragging && <div className="composer-drop-overlay"><Paperclip size={19}/>{copy.composer.dropFiles}</div>}

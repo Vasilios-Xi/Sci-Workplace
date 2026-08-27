@@ -21,6 +21,8 @@ export interface RuntimeConfig {
   port: number;
   authToken: string;
   projectRoot: string;
+  /** Additional user-approved folders that are first-class roots of this project. */
+  projectRoots?: string[];
   home: string;
   demo: boolean;
   deepSeekApiKey?: string;

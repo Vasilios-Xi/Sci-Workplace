@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelRequest } from '@openlab/protocol';
+import { codexDynamicTools, codexTurnInput, reasoningSummaryFromCompletedItem } from '../src/providers/codex-app-server-provider.js';
+import { ollamaChatContent, openAiChatContent } from '../src/providers/message-content.js';
 import { compatibleRequestExtras, KIMI_MODELS, MINIMAX_MODELS } from '../src/providers/catalog.js';
 import { LmStudioProvider } from '../src/providers/lm-studio-provider.js';
 import { OllamaProvider } from '../src/providers/ollama-provider.js';
@@ -30,6 +32,47 @@ function request(overrides: Partial<ModelRequest> = {}): ModelRequest {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('model providers', () => {
+  it('recovers a user-visible reasoning summary from a completed Codex item when no deltas were sent', () => {
+    expect(reasoningSummaryFromCompletedItem({
+      item: { type: 'reasoning', summary: [{ text: '先确认问题边界。' }, { text: '再比较可验证路径。' }] },
+    })).toBe('先确认问题边界。\n\n再比较可验证路径。');
+    expect(reasoningSummaryFromCompletedItem({ item: { type: 'agentMessage', summary: ['not reasoning'] } })).toBeUndefined();
+  });
+
+  it('registers Harness tools as Codex App Server dynamic functions', () => {
+    expect(codexDynamicTools([{
+      name: 'list_files', title: '列出文件', description: '列出项目文件',
+      inputSchema: { type: 'object', properties: { maxFiles: { type: 'integer' } } },
+      risk: 'read', renderHint: 'generic', source: 'core',
+    }])).toEqual([{
+      type: 'function', name: 'list_files', description: '列出文件\n列出项目文件',
+      inputSchema: { type: 'object', properties: { maxFiles: { type: 'integer' } } },
+    }]);
+  });
+
+  it('forwards multimodal message images to Codex App Server without embedding data in transcript text', () => {
+    const imageUrl = 'data:image/png;base64,AAAA';
+    const input = codexTurnInput([{
+      role: 'user',
+      content: [{ type: 'text', text: '请看图' }, { type: 'image_url', imageUrl }],
+    }]);
+    expect(input).toHaveLength(2);
+    expect(input[0]).toMatchObject({ type: 'text', text_elements: [] });
+    expect(String(input[0]?.text)).toContain('[image attachment 1]');
+    expect(String(input[0]?.text)).not.toContain(imageUrl);
+    expect(input[1]).toEqual({ type: 'image', detail: 'auto', url: imageUrl });
+  });
+
+  it('maps internal multimodal content to provider-native image formats', () => {
+    const imageUrl = 'data:image/png;base64,QUJD';
+    const content = [{ type: 'text' as const, text: 'inspect' }, { type: 'image_url' as const, imageUrl }];
+    expect(openAiChatContent(content)).toEqual([
+      { type: 'text', text: 'inspect' },
+      { type: 'image_url', image_url: { url: imageUrl } },
+    ]);
+    expect(ollamaChatContent(content)).toEqual({ content: 'inspect', images: ['QUJD'] });
+  });
+
   it('uses the current official Coding Plan model catalog and effort mappings', () => {
     expect(MINIMAX_MODELS[0]).toMatchObject({ nativeId: 'MiniMax-M3', contextWindow: 1_048_576, supportsVision: true });
     expect(KIMI_MODELS[0]?.reasoning).toMatchObject({ efforts: ['low', 'high', 'max'], defaultEffort: 'high' });

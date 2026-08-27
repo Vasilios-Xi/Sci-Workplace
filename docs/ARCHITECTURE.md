@@ -16,7 +16,7 @@ Sci Workplace Core 只管理 Harness 通用能力：服务生命周期、事件�
 
 Electron Main 创建安全窗口并管理 Runtime 子进程。Runtime 随机选择端口，只监听 `127.0.0.1`；主进程生成 256-bit 临时令牌。Renderer 通过 preload 获取连接信息，使用 Bearer token 和 WebSocket 通信，但没有 Node 权限。
 
-DeepSeek 请求、文件系统、终端、MCP 和插件进程全部位于 Runtime 侧。DeepSeek Key 只在 Electron Main 的加密文件和 Runtime 内存中出现。
+供应商请求、文件系统、终端、MCP 和插件进程全部位于 Runtime 侧。API Key 只在 Electron Main 的加密文件和 Runtime 内存中出现；Codex OAuth 由本机 Codex App Server 管理，Renderer 不接触 OAuth 凭据。
 
 ## 3. 微内核
 
@@ -54,13 +54,15 @@ user input
   → next step or finish turn
 ```
 
-每轮最多 12 个模型 step，避免无界工具循环。工具参数使用 JSON Schema/Ajv 验证。`read_only` 会在送模前移除变更型工具，而不只是在执行阶段拒绝。写入与删除工具先生成 unified diff，批准后创建 SHA-256 变更集和快照；撤销会校验当前哈希，防止覆盖后续修改。
+每轮最多 12 个模型 step，避免无界工具循环。工具参数使用 JSON Schema/Ajv 验证。权限模式分为 `auto`（按分类安全策略自动审核）、`trusted`（跳过普通项目操作的询问，但不越过禁止项与高风险边界）、`ask`（写入、执行和外部操作前询问）与 `read_only`；`read_only` 会在送模前移除变更型工具，而不只是在执行阶段拒绝。写入与删除工具先生成 unified diff，批准后创建 SHA-256 变更集和快照；撤销会校验当前哈希，防止覆盖后续修改。
 
 全新安装在用户确认前没有 Agent；首次引导只创建用户命名并确认的一名角色。此后所有 Agent 都来自用户创建、角色卡导入或对模板的明确确认，插件的 `agentTemplates` 也绝不自动实例化。Agent 定义属于全局角色库，项目绑定决定可用范围；会话固定一名 `lead` 并可加入若干 `member`，首轮后主管锁定，成员只可在空闲期变更。头像可选择内置样式或本地 PNG/JPEG/WebP；本地图片在 Renderer 中中心裁切为 256×256 WebP，Runtime 校验媒体签名和 256 KB 上限后写入事件，角色卡只携带图片数据而不携带本地路径。
 
 无显式提及时由主管回答；`@Agent` 只路由给当前会话成员，成员并行完成明确任务后由主管收敛。模型工具只能使用 `delegate_task`、`send_agent_message`、`run_channel`、`wait_for_agent_runs` 和 `ask_lead`，不存在创建 Agent 的工具。成员不能递归委派，也不能自行把其他角色加入会话；并发上限是运行限制，不是角色数量限制。成员只接收任务、显式引用、自己的项目记忆和关联频道消息，不继承主管的完整历史。
 
 每名会话成员在加入或用户主动刷新时生成不可变的能力快照。实际工具集合是 Agent 策略、项目绑定、会话快照、频道上限、权限模式、目录授权、模型能力以及当前有效插件/MCP 的交集；插件停用或凭据撤销属于安全例外，会立即移除失效工具。
+
+Renderer 中的主输入框、Agent 编辑器和供应商路由设置必须复用同一个 `ModelPicker`，并直接消费 `BootstrapSnapshot.models`。模型按 `providerId` 动态分组；新增或刷新模型不得在单个页面维护独立 `<option>` 列表，以保证所有模型入口自动保持同一格式与顺序。
 
 记忆以 Agent × Project 隔离，只有用户手动创建的全局置顶记忆可以跨项目。自动记忆和经验默认关闭；开启后由无工具、低思考的小工具模型异步提取候选，秘密、外部资料指令、低置信内容和未经验证的事实被拒绝。事件流仍是事实源，SQLite FTS5 只是可重建检索投影；上下文中的记忆最多占 10% 或 8K token。
 
@@ -81,6 +83,8 @@ user input
 
 所有工具返回值在再次送模前统一包裹为不可信输出；附件、科研对象、MCP 资源和插件上下文也不能把内部文本提升为系统或用户指令。
 
+聊天附件在事件中保存为工作区根、相对路径、大小、媒体类型和 SHA-256，不保存重复的 base64。每次编译上下文都会重新验证文件修订：短文本作为 `untrusted-research-data` 投影；图像只在目标模型声明 `supportsVision` 时读入并转换为供应商原生格式。新附图若选择了非视觉模型会在创建轮次前失败，历史中的旧图片仍可保留为可追溯引用，不会阻止后续纯文本对话。
+
 ## 7. 扩展
 
 Skills 是指令贡献，不获得权限。MCP stdio/Streamable HTTP 的 tools 与 resources 进入统一 Registry、审计与不可信渲染链。TypeScript 插件由 `PluginProcess` 在独立 Node 进程运行，以 JSON-RPC 2.0/stdio 调用；工具名带长度受限的来源命名空间，避免冲突。插件可贡献 `agentTemplates`；旧 `agentPresets` 只做兼容映射，均须用户确认后才能成为角色。
@@ -94,3 +98,21 @@ Skills 是指令贡献，不获得权限。MCP stdio/Streamable HTTP 的 tools �
 Provider 直接调用 DeepSeek `/chat/completions`，业务层只接触 `ModelEvent`。SSE 解析支持 reasoning、文本、跨 chunk 工具参数、usage、结束原因和缓存 token。模型列表由 `/models` 与本地能力表合并；模型 ID 不写入 Agent loop。
 
 只有首个增量到达前的 429、超时和临时 5xx 才重试。请求支持取消，首字节与流空闲分别有超时，异常结束写入 `model.failed`，已显示的部分输出标记为中断。费用估算由可替换的版本化价格表完成。
+
+## 9. Codex App Server Provider
+
+ChatGPT OAuth 模型通过本机 Codex App Server 的 JSON-RPC 协议接入。每个 Sci 模型 step 创建临时 Codex thread，并把最终 Sci 对话投影作为权威 transcript；模型清单、上下文窗口、推理档位和视觉能力来自 App Server，不在 UI 中硬编码。
+
+Sci 将当前可用工具注册为 `dynamicTools`。App Server 的 `item/tool/call` 服务端请求只被转换为 `ModelEvent.tool_call_delta`，随后中断临时 Codex turn；Runtime 仍按统一权限、目录授权和审计链执行工具，下一步把真实工具结果送回模型。Provider 明确禁止 Codex 原生命令、文件修改、MCP、浏览器和协作工具，避免绕过 Sci 的审批边界。
+
+图像输入在事件中仍使用文件引用。对支持视觉的 Codex 模型，Provider 在隔离 bridge 目录中创建精确临时图片并以 `localImage` 传给 App Server，thread 结束后立即删除；不支持视觉的模型不会收到图片。
+
+## 10. Provider 原生多模态格式
+
+内部 `ModelMessage` 使用统一的 `text` / `image_url` 内容部分。OpenAI-compatible 与 DeepSeek 映射为 Chat Completions `image_url`；Ollama 提取 data URL 的 base64 到 `images`；Codex App Server 映射为 `image` 或 `localImage` 用户输入。模型请求审计事件只保存引用和文本投影，不写入图像 base64。
+
+## 11. Windows 打包与 Reader Runtime
+
+Electron Builder 的 Windows 打包在构建前强制执行 Reader Runtime 完整性验证。离线 Runtime 包含 Worker、Docling/解析器分发元数据、模型、第三方许可证、`integrity.json` 和带语义清单的 `openlab-toolchain.json`；任一文件缺失、哈希不符、引用未列入清单或 `network` 不是 `false` 时，打包或启动注册失败。
+
+正式包通过 `OPENLAB_READER_RUNTIME_ROOT` 把资源目录交给 Runtime，作为 `source=bundled` 的 `openlab.reader-runtime` 工具链注册。PDF 作业仍在 Job Service 的资源上限与工作目录中运行，输入必须是修订绑定的授权文件。

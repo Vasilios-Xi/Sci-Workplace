@@ -38,6 +38,17 @@ describe('terminal output helpers', () => {
     expect(second).toMatchObject({ text: 'onetwothree', afterSequence: 3, status: 'exited', droppedOutputBytes: 12 });
   });
 
+  it('removes terminal control sequences before rendering PTY output', () => {
+    const output = mergeTerminalRead(emptyTerminalOutputState(), {
+      session: { id: 'terminal-1', status: 'running' },
+      chunks: [{ sequence: 1, data: '\u001b[?9001h\u001b[2JMicrosoft Windows\u001b]0;cmd.exe\u0007\r\n> echo PTY_OK\r\nPTY_OK\u001b[?25h' }],
+      droppedOutputBytes: 0,
+    });
+    expect(output.text).toContain('Microsoft Windows');
+    expect(output.text).toContain('PTY_OK');
+    expect(output.text).not.toContain('\u001b');
+  });
+
   it('keeps only the newest approximately one MiB of UTF-8 output', () => {
     const trimmed = trimTerminalOutput(`old-${'测'.repeat(TERMINAL_OUTPUT_TEXT_LIMIT)}-new`);
     expect(new TextEncoder().encode(trimmed).byteLength).toBeLessThanOrEqual(TERMINAL_OUTPUT_TEXT_LIMIT);

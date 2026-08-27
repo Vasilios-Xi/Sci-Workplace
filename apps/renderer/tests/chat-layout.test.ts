@@ -24,14 +24,26 @@ describe('chat layout preferences', () => {
       leftSidebarOpen: false,
       rightWorkspaceOpen: true,
       workspaceTab: 'files',
+      workspaceWidth: 999,
       composerHeight: 999,
     }))).toEqual({
       schemaVersion: 1,
       leftSidebarOpen: false,
       rightWorkspaceOpen: true,
       workspaceTab: 'files',
+      workspaceWidth: 720,
       composerHeight: 240,
     });
+  });
+
+  it('loads old version-one data with the default workspace width', () => {
+    expect(parseChatLayoutPreferences(JSON.stringify({
+      schemaVersion: 1,
+      leftSidebarOpen: true,
+      rightWorkspaceOpen: true,
+      workspaceTab: 'workspace',
+      composerHeight: null,
+    })).workspaceWidth).toBe(400);
   });
 
   it.each([

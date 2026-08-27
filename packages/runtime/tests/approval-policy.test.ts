@@ -34,15 +34,23 @@ describe('approval policy', () => {
   it('supports explicit allow, ask, and deny for ordinary project capabilities', () => {
     const approvals = new ApprovalPolicy();
     const write = tool({ risk: 'write' });
-    expect(approvals.evaluate(write, 'ask', policy({ workspaceWrite: 'allow' }))).toMatchObject({ action: 'allow', required: false, denied: false });
-    expect(approvals.evaluate(write, 'ask', policy({ workspaceWrite: 'ask' }))).toMatchObject({ action: 'ask', required: true, denied: false });
-    expect(approvals.evaluate(write, 'ask', policy({ workspaceWrite: 'deny' }))).toMatchObject({ action: 'deny', required: false, denied: true });
+    expect(approvals.evaluate(write, 'auto', policy({ workspaceWrite: 'allow' }))).toMatchObject({ action: 'allow', required: false, denied: false });
+    expect(approvals.evaluate(write, 'auto', policy({ workspaceWrite: 'ask' }))).toMatchObject({ action: 'ask', required: true, denied: false });
+    expect(approvals.evaluate(write, 'auto', policy({ workspaceWrite: 'deny' }))).toMatchObject({ action: 'deny', required: false, denied: true });
+  });
+
+  it('makes operation-before-prompt mode stricter than automatic review without prompting for ordinary reads', () => {
+    const approvals = new ApprovalPolicy();
+    expect(approvals.evaluate(tool({ risk: 'read' }), 'ask', policy({ projectRead: 'allow' }))).toMatchObject({ action: 'allow', required: false });
+    expect(approvals.evaluate(tool({ risk: 'write' }), 'ask', policy({ workspaceWrite: 'allow' }))).toMatchObject({ action: 'ask', required: true });
+    expect(approvals.evaluate(tool({ risk: 'network' }), 'ask', policy({ networkAccess: 'allow' }))).toMatchObject({ action: 'ask', required: true });
+    expect(approvals.evaluate(tool({ risk: 'write' }), 'ask', policy({ workspaceWrite: 'deny' }))).toMatchObject({ action: 'deny', denied: true });
   });
 
   it('uses deny over ask over allow when one call spans multiple categories', () => {
     const approvals = new ApprovalPolicy();
     const terminal = tool({ name: 'run_terminal', risk: 'execute' });
-    const result = approvals.evaluate(terminal, 'ask', policy({
+    const result = approvals.evaluate(terminal, 'auto', policy({
       terminalExecution: 'allow',
       networkAccess: 'ask',
       deletion: 'deny',
@@ -62,13 +70,13 @@ describe('approval policy', () => {
     const approvals = new ApprovalPolicy();
     expect(approvals.evaluate(tool({ risk: 'write' }), 'read_only', policy({ workspaceWrite: 'allow' }))).toMatchObject({ action: 'deny', denied: true });
     expect(approvals.evaluate(tool({ risk: 'read' }), 'read_only', policy({ projectRead: 'allow' }), { outsideWorkspace: true }).categories).toEqual(['projectRead', 'outsideWorkspace']);
-    expect(approvals.evaluate(tool({ name: 'install_plugin', risk: 'external' }), 'ask', policy({ extensionInstall: 'deny', outsideWorkspace: 'allow' }))).toMatchObject({ action: 'deny', categories: ['extensionInstall'] });
+    expect(approvals.evaluate(tool({ name: 'install_plugin', risk: 'external' }), 'auto', policy({ extensionInstall: 'deny', outsideWorkspace: 'allow' }))).toMatchObject({ action: 'deny', categories: ['extensionInstall'] });
   });
 
   it('applies the external-tools rule to plugin and MCP calls in addition to declared risk', () => {
     const approvals = new ApprovalPolicy();
     const pluginRead = tool({ risk: 'read', source: 'plugin', sourceId: 'example.plugin' });
-    const result = approvals.evaluate(pluginRead, 'ask', policy({ projectRead: 'allow', externalTools: 'ask' }));
+    const result = approvals.evaluate(pluginRead, 'auto', policy({ projectRead: 'allow', externalTools: 'ask' }));
     expect(result).toMatchObject({ action: 'ask', required: true, denied: false });
     expect(result.categories).toEqual(['projectRead', 'externalTools']);
   });

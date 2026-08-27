@@ -1,4 +1,5 @@
 import type { JsonValue } from '@openlab/protocol';
+import stripAnsi from 'strip-ansi';
 
 export const TERMINAL_OUTPUT_TEXT_LIMIT = 1024 * 1024;
 
@@ -78,7 +79,7 @@ export function mergeTerminalRead(current: TerminalOutputState, value: JsonValue
     ? Math.max(0, Math.trunc(result.droppedOutputBytes))
     : base.droppedOutputBytes;
   return {
-    text: trimTerminalOutput(`${base.text}${chunks.map((chunk) => chunk.data).join('')}`),
+    text: trimTerminalOutput(stripAnsi(`${base.text}${chunks.map((chunk) => chunk.data).join('')}`)),
     afterSequence,
     status,
     droppedOutputBytes,

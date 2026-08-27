@@ -8,6 +8,7 @@ import type {
   ModelUsage,
   ToolDefinition,
 } from '@openlab/protocol';
+import { openAiChatContent } from './message-content.js';
 import { parseSseData } from '../deepseek/sse.js';
 
 interface CompatibleChunk {
@@ -63,7 +64,7 @@ function nativeModelId(requested: string, providerId: ModelProviderId): string {
 function toMessage(message: ModelMessage): Record<string, unknown> {
   return {
     role: message.role,
-    content: message.content,
+    content: openAiChatContent(message.content),
     ...(message.name ? { name: message.name } : {}),
     ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
     ...(message.toolCalls ? {

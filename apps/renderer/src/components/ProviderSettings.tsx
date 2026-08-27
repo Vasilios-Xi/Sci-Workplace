@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   BrainCircuit, Check, CircleAlert, ExternalLink, Eye, EyeOff, Image as ImageIcon, KeyRound, LogIn,
   LogOut, Power, RefreshCw, Save, Server, Wrench,
 } from 'lucide-react';
-import type { HarnessSettings, ModelProviderConfig, ModelProviderId, ModelProviderState } from '@openlab/protocol';
+import type { HarnessSettings, ModelDescriptor, ModelProviderConfig, ModelProviderId, ModelProviderState } from '@openlab/protocol';
 import { agentV3ZhCN as v3Copy, hanaZhCN as copy } from '../i18n/zh-CN.js';
 import { confirmInApp } from './AppDialog.js';
+import { ModelPicker } from './ModelPicker.js';
 
 interface ProviderSettingsProps {
   providers: ModelProviderState[];
+  models: ModelDescriptor[];
   settings: HarnessSettings;
   onConfigure(id: ModelProviderId, patch: Partial<Pick<ModelProviderConfig, 'enabled' | 'credentialId' | 'baseUrl'>>, secret?: string): Promise<void>;
   onRefresh(id: ModelProviderId): Promise<void>;
@@ -110,8 +112,7 @@ export function ProviderSettings(props: ProviderSettingsProps) {
     if (props.providers.length > 0 && !props.providers.some((item) => item.definition.id === selectedId)) setSelectedId(props.providers[0]!.definition.id);
   }, [props.providers, selectedId]);
   const selected = props.providers.find((item) => item.definition.id === selectedId);
-  const models = useMemo(() => props.providers.flatMap((state) => state.status === 'connected' ? state.models : []), [props.providers]);
-  const modelOptions = (current: string) => [...new Map([{ id: current, label: current }, ...models].map((model) => [model.id, model])).values()];
+  const models = props.models;
 
   return <div className="provider-settings">
     <div className="settings-heading provider-heading"><span className="settings-heading__icon cyan"><Server size={20}/></span><div><h2>{copy.providers.title}</h2><p>{copy.providers.subtitle}</p></div></div>
@@ -127,8 +128,8 @@ export function ProviderSettings(props: ProviderSettingsProps) {
     <section className="provider-routing settings-card">
       <header><strong>{copy.providers.otherModels}</strong><span>{copy.providers.modelCount(models.length)}</span></header>
       <div>
-        <label><span><strong>{v3Copy.providerRouting.agentModel}</strong><small>{v3Copy.providerRouting.agentModelHint}</small></span><select value={props.settings.defaultAgentModel} onChange={(event) => void props.onUpdateSettings({ defaultAgentModel: event.target.value })}>{modelOptions(props.settings.defaultAgentModel).map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select></label>
-        <label><span><strong>{v3Copy.providerRouting.utilityModel}</strong><small>{v3Copy.providerRouting.utilityModelHint}</small></span><select value={props.settings.utilityModel} onChange={(event) => void props.onUpdateSettings({ utilityModel: event.target.value })}>{modelOptions(props.settings.utilityModel).map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</select></label>
+        <div className="provider-routing-field"><span><strong>{v3Copy.providerRouting.agentModel}</strong><small>{v3Copy.providerRouting.agentModelHint}</small></span><ModelPicker models={models} value={props.settings.defaultAgentModel} label={v3Copy.providerRouting.agentModel} variant="field" testId="provider-agent-model-picker" menuTestId="provider-agent-model-picker-menu" onChange={(defaultAgentModel) => void props.onUpdateSettings({ defaultAgentModel })}/></div>
+        <div className="provider-routing-field"><span><strong>{v3Copy.providerRouting.utilityModel}</strong><small>{v3Copy.providerRouting.utilityModelHint}</small></span><ModelPicker models={models} value={props.settings.utilityModel} label={v3Copy.providerRouting.utilityModel} variant="field" testId="provider-utility-model-picker" menuTestId="provider-utility-model-picker-menu" onChange={(utilityModel) => void props.onUpdateSettings({ utilityModel })}/></div>
       </div>
       {models.length === 0 && <p>{copy.providers.noConnectedModels}</p>}
     </section>

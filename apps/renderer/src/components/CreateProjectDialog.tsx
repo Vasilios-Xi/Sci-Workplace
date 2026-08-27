@@ -7,8 +7,18 @@ interface ProjectFolderSelection {
   name: string;
 }
 
-export function CreateProjectDialog({ open, onClose, onCreate }: {
+interface ExistingProjectFolders {
+  name: string;
+  sourceFolders: string[];
+}
+
+function folderName(path: string): string {
+  return path.trim().replace(/[\\/]+$/u, '').split(/[\\/]/u).filter(Boolean).at(-1) || path;
+}
+
+export function CreateProjectDialog({ open, initialProject, onClose, onCreate }: {
   open: boolean;
+  initialProject?: ExistingProjectFolders;
   onClose(): void;
   onCreate(input: { sourceFolders: string[]; name: string }): Promise<void>;
 }) {
@@ -19,17 +29,21 @@ export function CreateProjectDialog({ open, onClose, onCreate }: {
   const dialog = useRef<HTMLFormElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
   const restoreFocus = useRef<HTMLElement | null>(null);
+  const editing = Boolean(initialProject);
 
   useEffect(() => {
     if (!open) return;
     restoreFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setName('');
-    setFolders([]);
+    setName(initialProject?.name ?? '');
+    setFolders((initialProject?.sourceFolders ?? []).map((path) => ({ path, name: folderName(path) })));
     setBusy(false);
     setError(undefined);
-    const frame = requestAnimationFrame(() => nameInput.current?.focus());
+    const frame = requestAnimationFrame(() => {
+      if (initialProject) dialog.current?.querySelector<HTMLElement>('button:not(:disabled)')?.focus();
+      else nameInput.current?.focus();
+    });
     return () => cancelAnimationFrame(frame);
-  }, [open]);
+  }, [initialProject, open]);
 
   if (!open) return null;
 
@@ -93,11 +107,11 @@ export function CreateProjectDialog({ open, onClose, onCreate }: {
       onSubmit={(event) => { event.preventDefault(); void create(); }}
     >
       <header>
-        <h2 id="create-project-title">{copy.createProject.title}</h2>
+        <h2 id="create-project-title">{editing ? copy.createProject.manageTitle(initialProject!.name) : copy.createProject.title}</h2>
         <button type="button" aria-label={copy.createProject.close} disabled={busy} onClick={close}><X size={20}/></button>
       </header>
 
-      <label className="create-project-name">
+      {!editing && <label className="create-project-name">
         <span><FolderOpen size={20}/></span>
         <input
           ref={nameInput}
@@ -109,7 +123,7 @@ export function CreateProjectDialog({ open, onClose, onCreate }: {
           disabled={busy}
           onChange={(event) => setName(event.target.value)}
         />
-      </label>
+      </label>}
 
       <section className="create-project-source">
         <h3>{copy.createProject.sourceFolder}</h3>
@@ -121,7 +135,7 @@ export function CreateProjectDialog({ open, onClose, onCreate }: {
           onClick={() => void chooseFolder()}
         ><FolderPlus size={27}/><strong>{copy.createProject.addFolder}</strong></button> : <div className="create-project-folder-list" data-testid="create-project-folder-list">
           {folders.map((folder, index) => <div key={folder.path} className="create-project-folder-row" title={folder.path}>
-            <FolderOpen size={18}/><span><strong>{folder.name}</strong><small>{folder.path}</small></span><button type="button" aria-label={copy.createProject.removeFolder(folder.name)} disabled={busy} onClick={() => setFolders((current) => current.filter((item) => item.path !== folder.path))}><X size={16}/></button>{index === 0 && <em>{copy.createProject.primaryFolder}</em>}
+            <FolderOpen size={18}/><span><strong>{folder.name}</strong><small>{folder.path}</small></span>{(!editing || index > 0) && <button type="button" aria-label={copy.createProject.removeFolder(folder.name)} disabled={busy} onClick={() => setFolders((current) => current.filter((item) => item.path !== folder.path))}><X size={16}/></button>}{index === 0 && <em>{copy.createProject.primaryFolder}</em>}
           </div>)}
           <button type="button" className="create-project-add-folder" disabled={busy || folders.length >= 12} onClick={() => void chooseFolder()}><FolderPlus size={17}/><span>{copy.createProject.addAnotherFolder}</span></button>
         </div>}
@@ -131,7 +145,7 @@ export function CreateProjectDialog({ open, onClose, onCreate }: {
 
       <footer>
         <button type="button" className="create-project-cancel" disabled={busy} onClick={close}>{copy.createProject.cancel}</button>
-        <button type="submit" className="create-project-confirm" data-testid="create-project-confirm" disabled={folders.length === 0 || !name.trim() || busy}>{busy && <LoaderCircle className="spin" size={16}/>} {busy ? copy.createProject.creating : copy.createProject.create}</button>
+        <button type="submit" className="create-project-confirm" data-testid="create-project-confirm" disabled={folders.length === 0 || !name.trim() || busy}>{busy && <LoaderCircle className="spin" size={16}/>} {busy ? editing ? copy.createProject.saving : copy.createProject.creating : editing ? copy.createProject.saveFolders : copy.createProject.create}</button>
       </footer>
     </form>
   </div>;

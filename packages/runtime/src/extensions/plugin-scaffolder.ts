@@ -96,7 +96,7 @@ export function scaffoldPlugin(projectRoot: string, input: { id: string; name: s
     reasoningEffort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     toolNames: string[];
     skillIds: string[];
-    permissionMode: 'read_only' | 'ask' | 'trusted';
+    permissionMode: 'auto' | 'trusted' | 'ask' | 'read_only';
     contextBudget: number;
   }
   export interface AgentTemplate {

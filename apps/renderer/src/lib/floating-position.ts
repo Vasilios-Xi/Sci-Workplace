@@ -1,7 +1,7 @@
 import { useLayoutEffect, useState } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 
-export type FloatingPlacement = 'top-start' | 'top-end' | 'bottom-start' | 'bottom-end';
+export type FloatingPlacement = 'top-start' | 'top-center' | 'top-end' | 'bottom-start' | 'bottom-center' | 'bottom-end';
 
 interface FloatingPositionOptions {
   open: boolean;
@@ -37,8 +37,11 @@ export function useFloatingPosition({
         const roomAbove = anchorBox.top - viewportMargin;
         const roomBelow = window.innerHeight - anchorBox.bottom - viewportMargin;
         const placeAbove = preferTop ? roomAbove >= surfaceBox.height + offset || roomAbove >= roomBelow : !(roomBelow >= surfaceBox.height + offset || roomBelow >= roomAbove);
+        const alignedCenter = placement.endsWith('center');
         const alignedEnd = placement.endsWith('end');
-        const idealLeft = alignedEnd ? anchorBox.right - surfaceBox.width : anchorBox.left;
+        const idealLeft = alignedCenter
+          ? anchorBox.left + (anchorBox.width - surfaceBox.width) / 2
+          : alignedEnd ? anchorBox.right - surfaceBox.width : anchorBox.left;
         const left = Math.min(
           Math.max(viewportMargin, idealLeft),
           Math.max(viewportMargin, window.innerWidth - surfaceBox.width - viewportMargin),

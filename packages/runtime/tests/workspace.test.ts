@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ModelEvent, ModelProvider, ModelRequest } from '@openlab/protocol';
@@ -31,26 +31,56 @@ async function waitForIdle(runtime: OpenLabRuntime, timeout = 3_000): Promise<vo
 }
 
 describe('session workspace store', () => {
+  it('treats every folder bound to a project as a stable first-class workspace root', () => {
+    const project = temporaryDirectory('project');
+    const evidence = temporaryDirectory('project-evidence');
+    const datasets = temporaryDirectory('project-datasets');
+    const state = temporaryDirectory('state');
+    writeFileSync(join(evidence, 'paper.md'), 'bound evidence', 'utf8');
+    const events = new SqliteEventStore(join(state, 'events.db'));
+    const options = {
+      projectId: 'project-1', projectRoot: project, projectRoots: [evidence], projectName: 'Project', sessionId: 'session-1',
+      model: 'fixture-model', snapshotRoot: join(state, 'snapshots'), events,
+    };
+    const workspace = new SessionWorkspaceStore(options);
+    const bound = workspace.snapshot().roots.find((root) => root.displayPath === evidence);
+    expect(bound).toMatchObject({ name: basename(evidence), kind: 'project', access: 'trusted', status: 'online' });
+    expect(workspace.listDirectory({ rootId: bound!.id, path: '.' })[0]).toMatchObject({ name: 'paper.md' });
+    expect(() => workspace.revokeRoot(bound!.id, actor)).toThrow(/项目设置/u);
+
+    const restoredForAnotherConversation = new SessionWorkspaceStore({ ...options, sessionId: 'session-2' });
+    expect(restoredForAnotherConversation.snapshot().roots.some((root) => root.displayPath === evidence)).toBe(true);
+    restoredForAnotherConversation.setProjectRoots([datasets]);
+    expect(restoredForAnotherConversation.snapshot().roots.some((root) => root.displayPath === evidence)).toBe(false);
+    expect(restoredForAnotherConversation.snapshot().roots.some((root) => root.displayPath === datasets)).toBe(true);
+    events.close();
+  });
+
   it('persists roots, notes and conversation files while keeping paths root-relative', () => {
     const project = temporaryDirectory('project');
     const external = temporaryDirectory('external');
     const state = temporaryDirectory('state');
     writeFileSync(join(external, 'evidence.md'), '# Evidence\nneedle', 'utf8');
+    writeFileSync(join(external, 'paper.pdf'), Buffer.from('%PDF-1.4\npreview fixture', 'utf8'));
+    writeFileSync(join(external, 'notes.docx'), Buffer.from('PK\u0003\u0004docx preview fixture', 'binary'));
     const events = new SqliteEventStore(join(state, 'events.db'));
     const options = {
       projectId: 'project-1', projectRoot: project, projectName: 'Project', sessionId: 'session-1',
       model: 'fixture-model', snapshotRoot: join(state, 'snapshots'), events,
     };
     const workspace = new SessionWorkspaceStore(options);
+    expect(workspace.snapshot().roots.find((candidate) => candidate.id === 'project')?.name).toBe(basename(project));
     const root = workspace.authorizeRoot(external, 'ask', actor);
     workspace.setActiveRoot(root.id, actor);
     workspace.setNote('Only compare measured evidence.', actor);
 
-    expect(workspace.listDirectory({ rootId: root.id, path: '.' })).toEqual([
+    expect(workspace.listDirectory({ rootId: root.id, path: '.' })).toEqual(expect.arrayContaining([
       expect.objectContaining({ rootId: root.id, path: 'evidence.md', name: 'evidence.md' }),
-    ]);
+    ]));
     expect(workspace.search(root.id, 'needle', { includeContent: true })[0]?.matches?.[0]).toMatchObject({ line: 2 });
     expect(workspace.preview({ rootId: root.id, path: 'evidence.md' })).toMatchObject({ kind: 'text', content: '# Evidence\nneedle' });
+    expect(workspace.preview({ rootId: root.id, path: 'paper.pdf' })).toMatchObject({ kind: 'pdf', mediaType: 'application/pdf', dataUrl: expect.stringMatching(/^data:application\/pdf;base64,/u) });
+    expect(workspace.preview({ rootId: root.id, path: 'notes.docx' })).toMatchObject({ kind: 'word', mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', dataUrl: expect.stringMatching(/^data:application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document;base64,/u) });
     expect(workspace.chatAttachment({ rootId: root.id, path: 'evidence.md' })).toMatchObject({ rootId: root.id, relativePath: 'evidence.md' });
     workspace.registerConversationFile({ rootId: root.id, path: 'evidence.md' }, 'reference', actor);
 
@@ -58,6 +88,12 @@ describe('session workspace store', () => {
     expect(restored.snapshot()).toMatchObject({ activeRootId: root.id, note: 'Only compare measured evidence.', conversationFileCount: 1 });
     expect(restored.conversationFiles()[0]).toMatchObject({ ref: { rootId: root.id, path: 'evidence.md' }, origin: 'reference' });
     expect(JSON.stringify(restored.rootForModel(root.id))).not.toContain(external);
+    const anotherConversation = new SessionWorkspaceStore({ ...options, sessionId: 'session-2' });
+    expect(anotherConversation.snapshot().note).toBe('Only compare measured evidence.');
+    restored.removeConversationFile(restored.conversationFiles()[0]!.id, actor);
+    const restoredAfterRemoval = new SessionWorkspaceStore(options);
+    expect(restoredAfterRemoval.snapshot().conversationFileCount).toBe(0);
+    expect(restoredAfterRemoval.conversationFiles()).toEqual([]);
     events.close();
   });
 

@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import {
   INTERFACE_THEME_IDS,
+  MARKDOWN_BODY_SIZE_MAX,
+  MARKDOWN_BODY_SIZE_MIN,
   SEMANTIC_COLOR_ROLES,
   isSemanticHexColor,
   type ContentWidth,
@@ -50,12 +52,13 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`interface-toggle ${checked ? 'is-on' : ''}`} onClick={() => onChange(!checked)}><span/></button>;
 }
 
-function StepControl<T extends string | number>({ value, options, onChange }: {
+function StepControl<T extends string | number>({ value, options, testId, onChange }: {
   value: T;
   options: Array<{ value: T; label: string }>;
+  testId?: string;
   onChange(value: T): void;
 }) {
-  return <div className="interface-step-control" style={{ '--step-count': options.length } as CSSProperties}>{options.map((option) => <button key={String(option.value)} type="button" className={value === option.value ? 'is-active' : ''} aria-pressed={value === option.value} onClick={() => onChange(option.value)}><span/><small>{option.label}</small></button>)}</div>;
+  return <div className="interface-step-control" data-testid={testId} style={{ '--step-count': options.length } as CSSProperties}>{options.map((option) => <button key={String(option.value)} type="button" className={value === option.value ? 'is-active' : ''} aria-pressed={value === option.value} onClick={() => onChange(option.value)}><span/><small>{option.label}</small></button>)}</div>;
 }
 
 function NumberControl({ value, min, max, step = 1, suffix, onChange }: { value: number; min: number; max: number; step?: number; suffix?: string; onChange(value: number): void }) {
@@ -225,7 +228,7 @@ export function InterfaceSettings() {
         <button type="button" className={preferences.readingFont === 'sans' ? 'is-active' : ''} onClick={() => update({ readingFont: 'sans' })}><span className="sans-sample">Aa</span><span><strong>{text.sans}</strong><small>{text.sansHint}</small></span>{preferences.readingFont === 'sans' && <Check size={13}/>}</button>
       </div>
       <div className="interface-card">
-        <Row title={text.bodySize} hint={text.bodySizeHint}><StepControl value={preferences.readingSizeDelta} options={[-2, -1, 0, 1, 2].map((value) => ({ value: value as InterfacePreferences['readingSizeDelta'], label: value > 0 ? `+${value}` : String(value) }))} onChange={(readingSizeDelta) => update({ readingSizeDelta })}/></Row>
+        <Row title={text.bodySize} hint={text.bodySizeHint}><StepControl testId="reading-size-control" value={preferences.readingSizeDelta} options={[-2, -1, 0, 1, 2].map((value) => ({ value: value as InterfacePreferences['readingSizeDelta'], label: value > 0 ? `+${value}` : String(value) }))} onChange={(readingSizeDelta) => update({ readingSizeDelta })}/></Row>
         <Row title={text.chatWidth} hint={text.chatWidthHint}><StepControl value={preferences.chatWidth} options={widthOptions} onChange={(chatWidth) => update({ chatWidth })}/></Row>
       </div>
     </Section>
@@ -245,11 +248,11 @@ export function InterfaceSettings() {
     <Section icon={<Sparkles size={16}/>} title={text.editor} hint={text.editorHint}>
       <div className="interface-card editor-interface-card">
         <Row title={text.editorFont}><select value={preferences.markdown.font} onChange={(event) => setMarkdown({ font: event.target.value as EditorFont })}><option value="follow-reading">{text.followReading}</option><option value="serif">{text.serif}</option><option value="sans">{text.sans}</option><option value="monospace">{text.monospace}</option></select></Row>
-        <Row title={text.bodySize}><NumberControl value={preferences.markdown.bodySize} min={12} max={24} suffix="px" onChange={(bodySize) => setMarkdown({ bodySize }, true)}/></Row>
+        <Row title={text.bodySize}><NumberControl value={preferences.markdown.bodySize} min={MARKDOWN_BODY_SIZE_MIN} max={MARKDOWN_BODY_SIZE_MAX} step={0.5} suffix="px" onChange={(bodySize) => setMarkdown({ bodySize }, true)}/></Row>
         <Row title={text.contentWidth}><StepControl value={preferences.markdown.contentWidth} options={widthOptions} onChange={(contentWidth) => setMarkdown({ contentWidth })}/></Row>
-        <Row title={text.heading1}><NumberControl value={preferences.markdown.heading1Size} min={20} max={48} suffix="px" onChange={(heading1Size) => setMarkdown({ heading1Size }, true)}/></Row>
-        <Row title={text.heading2}><NumberControl value={preferences.markdown.heading2Size} min={18} max={40} suffix="px" onChange={(heading2Size) => setMarkdown({ heading2Size }, true)}/></Row>
-        <Row title={text.heading3}><NumberControl value={preferences.markdown.heading3Size} min={14} max={32} suffix="px" onChange={(heading3Size) => setMarkdown({ heading3Size }, true)}/></Row>
+        <Row title={text.heading1}><NumberControl value={preferences.markdown.heading1Size} min={16} max={36} suffix="px" onChange={(heading1Size) => setMarkdown({ heading1Size }, true)}/></Row>
+        <Row title={text.heading2}><NumberControl value={preferences.markdown.heading2Size} min={14} max={30} suffix="px" onChange={(heading2Size) => setMarkdown({ heading2Size }, true)}/></Row>
+        <Row title={text.heading3}><NumberControl value={preferences.markdown.heading3Size} min={12} max={24} suffix="px" onChange={(heading3Size) => setMarkdown({ heading3Size }, true)}/></Row>
         <Row title={text.lineHeight}><NumberControl value={preferences.markdown.lineHeight} min={1.2} max={2.2} step={0.1} onChange={(lineHeight) => setMarkdown({ lineHeight }, true)}/></Row>
         <Row title={text.contentPadding}><NumberControl value={preferences.markdown.contentPadding} min={0} max={64} suffix="px" onChange={(contentPadding) => setMarkdown({ contentPadding }, true)}/></Row>
       </div>

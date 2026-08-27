@@ -9,6 +9,9 @@ import {
 
 export interface DesktopSettings {
   projectRoot?: string;
+  recentProjectRoots?: string[];
+  /** User-approved folders bound to a project, keyed by the project's stable manifest id. */
+  projectSourceFolders?: Record<string, string[]>;
   interfacePreferences?: InterfacePreferences;
   worktableUi?: Record<string, WorktableDeviceUiState>;
 }
@@ -42,12 +45,97 @@ function recordValue(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function normalizeRecentProjectRoots(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const roots: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') continue;
+    const root = candidate.trim();
+    const key = root.toLocaleLowerCase();
+    if (!root || root.length > 32_768 || seen.has(key)) continue;
+    seen.add(key);
+    roots.push(root);
+    if (roots.length >= 20) break;
+  }
+  return roots;
+}
+
+function normalizeFolderList(value: unknown, limit = 12): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const folders: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') continue;
+    const folder = candidate.trim();
+    const key = folder.toLocaleLowerCase();
+    if (!folder || folder.length > 32_768 || seen.has(key)) continue;
+    seen.add(key);
+    folders.push(folder);
+    if (folders.length >= limit) break;
+  }
+  return folders;
+}
+
+function normalizeProjectSourceFolderMap(value: unknown): Record<string, string[]> {
+  const output: Record<string, string[]> = {};
+  for (const [projectId, rawFolders] of Object.entries(recordValue(value)).slice(0, 100)) {
+    if (!projectId || projectId.length > 200) continue;
+    const folders = normalizeFolderList(rawFolders);
+    if (folders.length) output[projectId] = folders;
+  }
+  return output;
+}
+
+export function projectSourceFolders(settings: DesktopSettings, projectId: string, rootPath: string): string[] {
+  return normalizeFolderList([rootPath, ...(settings.projectSourceFolders?.[projectId] ?? [])]);
+}
+
+export function rememberProjectSourceFolders(settings: DesktopSettings, projectId: string, rootPath: string, folders: string[]): DesktopSettings {
+  const projectSourceFolders = normalizeProjectSourceFolderMap(settings.projectSourceFolders);
+  projectSourceFolders[projectId] = normalizeFolderList([rootPath, ...folders]);
+  return { ...settings, projectSourceFolders };
+}
+
+export function forgetProjectSourceFolders(settings: DesktopSettings, projectId: string): DesktopSettings {
+  const projectSourceFolders = normalizeProjectSourceFolderMap(settings.projectSourceFolders);
+  delete projectSourceFolders[projectId];
+  return { ...settings, projectSourceFolders };
+}
+
+/**
+ * Adds a project to the desktop catalog without turning ordinary navigation
+ * into an MRU reorder. A project's first insertion establishes its sidebar
+ * position; activating another conversation in that project must not move it.
+ */
+export function rememberRecentProjectRoot(settings: DesktopSettings, rootPath: string): DesktopSettings {
+  const root = rootPath.trim();
+  const recentProjectRoots = normalizeRecentProjectRoots(settings.recentProjectRoots);
+  if (!root) return { ...settings, recentProjectRoots };
+  const key = root.toLocaleLowerCase();
+  if (recentProjectRoots.some((candidate) => candidate.toLocaleLowerCase() === key)) {
+    return { ...settings, recentProjectRoots };
+  }
+  return { ...settings, recentProjectRoots: [root, ...recentProjectRoots].slice(0, 20) };
+}
+
+/** Returns the stable catalog order, adding active/legacy roots only as fallbacks. */
+export function orderedProjectRootCandidates(settings: DesktopSettings, activeRoot?: string): string[] {
+  return normalizeRecentProjectRoots([
+    ...(settings.recentProjectRoots ?? []),
+    activeRoot,
+    settings.projectRoot,
+  ]);
+}
+
 export function readDesktopSettings(path: string, timeZone?: string): DesktopSettings {
   try {
     if (!existsSync(path)) return {};
     const input = recordValue(JSON.parse(readFileSync(path, 'utf8')) as unknown);
     return {
       ...(typeof input.projectRoot === 'string' && input.projectRoot ? { projectRoot: input.projectRoot } : {}),
+      recentProjectRoots: normalizeRecentProjectRoots(input.recentProjectRoots),
+      projectSourceFolders: normalizeProjectSourceFolderMap(input.projectSourceFolders),
       interfacePreferences: normalizeInterfacePreferences(input.interfacePreferences, timeZone),
       worktableUi: normalizeWorktableUi(input.worktableUi),
     };

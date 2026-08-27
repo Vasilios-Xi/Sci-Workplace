@@ -27,10 +27,10 @@ describe('interface preferences', () => {
   it('uses the Hana-style defaults without hard-coding the machine timezone', () => {
     const preferences = defaultInterfacePreferences('Europe/London');
     expect(preferences).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 6,
       theme: 'warm-paper',
       semanticPaletteOverrides: {},
-      readingFont: 'serif',
+      readingFont: 'sans',
       readingSizeDelta: 0,
       chatWidth: 800,
       paperTexture: true,
@@ -39,7 +39,7 @@ describe('interface preferences', () => {
       singleLineSessions: false,
       locale: 'zh-CN',
       timeZone: 'Europe/London',
-      markdown: { font: 'follow-reading', bodySize: 16, contentWidth: 800, heading1Size: 28, heading2Size: 21, heading3Size: 18, lineHeight: 1.5, contentPadding: 24 },
+      markdown: { font: 'follow-reading', bodySize: 12, contentWidth: 800, heading1Size: 21, heading2Size: 17, heading3Size: 14, lineHeight: 1.5, contentPadding: 24 },
     });
   });
 
@@ -50,9 +50,9 @@ describe('interface preferences', () => {
       markdown: { bodySize: 80, heading1Size: 1, heading2Size: 99, heading3Size: 5, lineHeight: 4, contentPadding: -8 },
     }, 'UTC');
     expect(preferences).toMatchObject({
-      theme: 'warm-paper', readingFont: 'serif', readingSizeDelta: 0, chatWidth: 800,
+      theme: 'warm-paper', readingFont: 'sans', readingSizeDelta: 0, chatWidth: 800,
       paperTexture: true, hardwareAcceleration: false, timeZone: 'UTC',
-      markdown: { bodySize: 24, heading1Size: 20, heading2Size: 40, heading3Size: 14, lineHeight: 2.2, contentPadding: 0 },
+      markdown: { bodySize: 20, heading1Size: 16, heading2Size: 30, heading3Size: 12, lineHeight: 2.2, contentPadding: 0 },
     });
     expect(isValidTimeZone('Asia/Shanghai')).toBe(true);
     expect(isValidTimeZone('Not/AZone')).toBe(false);
@@ -62,7 +62,28 @@ describe('interface preferences', () => {
     const current = defaultInterfacePreferences('UTC');
     const next = mergeInterfacePreferences(current, { theme: 'cyan-night', markdown: { bodySize: 19 } });
     expect(next.theme).toBe('cyan-night');
-    expect(next.markdown).toMatchObject({ bodySize: 19, heading1Size: 28, contentWidth: 800 });
+    expect(next.markdown).toMatchObject({ bodySize: 19, heading1Size: 21, contentWidth: 800 });
+  });
+
+  it('migrates the former 16px body default to the compact 12px reading baseline', () => {
+    const preferences = normalizeInterfacePreferences({
+      schemaVersion: 3,
+      readingFont: 'sans',
+      markdown: { bodySize: 16, heading1Size: 28, heading2Size: 21, heading3Size: 18 },
+    }, 'UTC');
+    expect(preferences).toMatchObject({ schemaVersion: 6, readingSizeDelta: 0, markdown: { bodySize: 12, heading1Size: 21, heading2Size: 17, heading3Size: 14 } });
+    const schemaFour = normalizeInterfacePreferences({
+      schemaVersion: 4,
+      readingFont: 'sans',
+      markdown: { bodySize: 11.5, heading1Size: 28, heading2Size: 21, heading3Size: 18 },
+    }, 'UTC');
+    expect(schemaFour).toMatchObject({ schemaVersion: 6, markdown: { bodySize: 12, heading1Size: 21, heading2Size: 17, heading3Size: 14 } });
+    const schemaFive = normalizeInterfacePreferences({
+      schemaVersion: 5,
+      readingFont: 'sans',
+      markdown: { bodySize: 12, heading1Size: 22, heading2Size: 18, heading3Size: 15 },
+    }, 'UTC');
+    expect(schemaFive).toMatchObject({ schemaVersion: 6, markdown: { bodySize: 12, heading1Size: 21, heading2Size: 17, heading3Size: 14 } });
   });
 
   it('migrates schema v1 palettes and keeps only valid per-theme overrides', () => {
@@ -76,7 +97,7 @@ describe('interface preferences', () => {
         unknown: { danger: '#AABBCC' },
       },
     }, 'UTC');
-    expect(preferences.schemaVersion).toBe(2);
+    expect(preferences.schemaVersion).toBe(6);
     expect(preferences.semanticPaletteOverrides).toEqual({
       'warm-paper': { neutral: '#ABCDEF' },
       'cyan-night': { info: '#82B7D1' },
@@ -119,7 +140,7 @@ describe('interface preferences', () => {
     writeFileSync(path, JSON.stringify({ projectRoot: 'F:\\Research' }), 'utf8');
     const migrated = readDesktopSettings(path, 'Asia/Shanghai');
     expect(migrated.projectRoot).toBe('F:\\Research');
-    expect(migrated.interfacePreferences).toMatchObject({ schemaVersion: 2, semanticPaletteOverrides: {}, timeZone: 'Asia/Shanghai' });
+    expect(migrated.interfacePreferences).toMatchObject({ schemaVersion: 6, semanticPaletteOverrides: {}, timeZone: 'Asia/Shanghai' });
     writeDesktopSettingsAtomic(path, { ...migrated, interfacePreferences: mergeInterfacePreferences(migrated.interfacePreferences!, { theme: 'coral-paper' }) });
     expect(existsSync(path)).toBe(true);
     expect(JSON.parse(readFileSync(path, 'utf8')).interfacePreferences.theme).toBe('coral-paper');

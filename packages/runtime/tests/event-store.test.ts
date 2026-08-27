@@ -55,6 +55,23 @@ describe('SQLite event store', () => {
     reopened.close();
   });
 
+  it('keeps temporary chat streams in memory and discards them without persistence', () => {
+    const path = join(temporaryDirectory(), 'events.db');
+    const streamId = 'session:temporary-chat';
+    const first = new SqliteEventStore(path);
+    first.markTemporaryStream(streamId);
+    first.append({ streamId, kind: 'message.recorded', actor: { id: 'user', kind: 'user' }, payload: { text: 'ephemeral' } });
+    expect(first.isTemporaryStream(streamId)).toBe(true);
+    expect(first.list(streamId).map((event) => event.payload)).toEqual([{ text: 'ephemeral' }]);
+    expect(first.listStreams().some((stream) => stream.streamId === streamId)).toBe(true);
+    first.close();
+
+    const reopened = new SqliteEventStore(path);
+    expect(reopened.list(streamId)).toEqual([]);
+    expect(reopened.listStreams().some((stream) => stream.streamId === streamId)).toBe(false);
+    reopened.close();
+  });
+
   it('creates a consistent SQLite backup without overwriting a destination', () => {
     const root = temporaryDirectory();
     const store = new SqliteEventStore(join(root, 'events.db'));

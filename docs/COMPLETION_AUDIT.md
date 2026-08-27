@@ -27,7 +27,7 @@ Windows Job Object 与 Node 权限模型属于应用层防护，不是恶意代�
 | DeepSeek Provider | 已实现；live smoke 待密钥 | 原生 fetch、SSE 任意分片、reasoning、文本、跨 chunk 工具调用、usage/cache token、取消、首字节前重试、超时、模型动态发现与版本化价格表。Agent loop 不接触 DeepSeek 专属结构。 |
 | 单 Agent 工具循环 | 已实现并验收 | 固定 context→model→approval→tool→next step 流程，最多 12 step；工具 schema 校验；超长结果转 Artifact。E2E 覆盖聊天、写入、审批和撤销。 |
 | 文件与终端工具 | 已实现并单测 | 列举、读取、搜索、diff 写入、diff 删除、哈希快照、冲突检测撤销、受控 PowerShell；路径 realpath/symlink 边界与文件/输出/时间资源上限。 |
-| 权限模型 | 已实现并单测 | 项目读取默认允许；写入/终端审批；删除、网络、外部路径与安装逐次确认；`read_only` 在送模工具列表中移除变更能力；持久成员实际能力由 Agent 策略、会话快照、频道上限、权限模式、目录授权、模型和扩展状态求交。 |
+| 权限模型 | 已实现并单测 | `auto` 按分类安全策略自动审核，`ask` 对写入、执行和外部操作收紧为逐次确认，`trusted` 仅跳过普通项目操作的询问，`read_only` 在送模工具列表中移除变更能力；明确禁止与高风险边界仍然生效，持久成员实际能力由 Agent 策略、会话快照、频道上限、权限模式、目录授权、模型和扩展状态求交。 |
 | Context Compiler / Inspector | 已实现并单测/验收 | 稳定前缀、强制 request-schema、最近消息/输出预留、固定对象、显式信任、80% 可追溯压缩、长结果卸载、token/来源/缓存命中 UI。原始事件不删除。 |
 | 科研对象与 provenance | 已实现并单测 | `Source`、`Dataset`、`Experiment`、`Evidence`、`Artifact`，六种核心关系；Artifact 记录输入对象、哈希、Agent、模型、工具/插件版本、session/task/trace。 |
 | 持久多 Agent | 已实现并验收 | 确认前零 Agent，首启只创建用户确认的一名角色；其后只允许用户创建/导入/确认模板。全局角色库、项目启停、会话主管锁定与成员绑定、`@Agent` 并行路由、主管收敛、1–8 并发限制均已实现；模型工具中不存在 Agent 创建能力。 |
@@ -41,7 +41,7 @@ Windows Job Object 与 Node 权限模型属于应用层防护，不是恶意代�
 | TypeScript 插件 | 已实现并单测/验收 | Manifest/engine/贡献校验，JSON-RPC stdio 独立进程，命名空间工具、设置/context/Agent 模板/对象/UI contribution、目录/ZIP 导入导出、启停/卸载/热重载与回滚；模板必须由用户确认，旧 preset 只兼容映射。 |
 | 对话内插件开发 | 已实现并打包验收 | 生成 `src/index.ts`/类型契约/测试，临时副本隔离依赖安装、strict typecheck、契约和健康测试、权限/依赖预览、staging 安装、哈希锁与原子切换。打包版 E2E 实际完成脚手架→测试→批准→安装→重启恢复。 |
 | 插件供应链与机器授权 | 已实现并单测 | 拒绝本地/Git/HTTP 依赖、移除包管理器配置、禁用 lifecycle scripts、无 symlink 依赖树、tree/ZIP 限额；项目锁不是自动执行授权，另需本机项目—插件哈希锁。 |
-| 插件 UI | 已实现 | Runtime 校验 realpath，注入严格 CSP；Renderer 使用无 `allow-same-origin` 的 sandbox iframe 和只读初始化桥。 |
+| 插件 UI | 已实现 | Runtime 校验 realpath 并注入严格 CSP；Renderer 使用无 `allow-same-origin` 的 sandbox iframe 和一次性 MessagePort。当前标签上下文、声明工具与证据跳转均由 Runtime 复核，写工具逐次确认。 |
 | Hana 风格中文科研工作台 | 已实现并视觉验收 | 顶部对话/频道切换与可拖动区域、会话成员头像芯片、连续浅色画布、悬浮输入框、紧凑 Agent/工具/diff/审批卡、右侧对话文件/工作台/便笺，以及独立频道三栏视图；未复制 HanaAgent 源码或素材。 |
 | 本地数据与恢复 | 已实现并验收 | `%APPDATA%` 数据、项目 `.openlab` 投影、安全存储、日志脱敏导出、数据库备份、未完成流/审批恢复。E2E 关闭并重启后验证会话、四名持久 Agent、成员绑定、记忆、能力快照、频道和插件。 |
 | Windows 打包 | 已实现并验收 | Electron Builder NSIS x64；打包版 E2E 验证 ASAR 解包后的 Runtime、pnpm/TypeScript 插件工具链与生产资源路径。 |

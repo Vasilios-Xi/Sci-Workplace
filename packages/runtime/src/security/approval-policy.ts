@@ -76,6 +76,7 @@ export class ApprovalPolicy {
 
     const rules = categories.map((category) => {
       const configured = normalizedPolicy[category];
+      if (mode === 'ask' && configured === 'allow' && category !== 'projectRead') return 'ask';
       if (mode === 'trusted' && configured === 'ask' && this.isOrdinaryCategory(category)) return 'allow';
       if (context.trustedWorkspace && configured === 'ask' && category === 'outsideWorkspace') return 'allow';
       return configured;
@@ -90,7 +91,9 @@ export class ApprovalPolicy {
     if (action === 'ask') {
       return {
         action, required: true, denied: false, categories,
-        rationale: '用户设置的安全策略要求在执行此类操作前确认。',
+        rationale: mode === 'ask'
+          ? '当前会话采用操作前询问模式。'
+          : '用户设置的安全策略要求在执行此类操作前确认。',
       };
     }
     return {

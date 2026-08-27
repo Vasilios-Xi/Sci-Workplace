@@ -109,7 +109,20 @@ describe('protocol-v5 top-level worktable runtime', () => {
       artifactRevisionId: 'artifact-revision-1',
       archivedAt: archived.archivedAt,
     });
+    const recovered = restored.restore(instance.id, actor, archived.revision);
+    expect(recovered).toMatchObject({ status: 'idle', revision: archived.revision + 1 });
+    expect(recovered.archivedAt).toBeUndefined();
+    expect(() => restored.restore(instance.id, actor)).toThrow(/只有已归档/u);
     restoredEvents.close();
+
+    const recoveredEvents = new SqliteEventStore(database);
+    expect(new WorktableStore({ projectId: 'project-v5', events: recoveredEvents }).snapshot().instances[0]).toMatchObject({
+      id: instance.id,
+      status: 'idle',
+      revision: archived.revision + 1,
+    });
+    expect(recoveredEvents.list('project:project-v5').some((event) => event.kind === 'worktable.restored')).toBe(true);
+    recoveredEvents.close();
   });
 
   it('validates versioned template inputs and migrates legacy instance projections', () => {
@@ -200,6 +213,21 @@ describe('protocol-v5 top-level worktable runtime', () => {
       expect(pushes.some((message) => message.type === 'browser.changed')).toBe(true);
       expect(runtime.events.list(`project:${runtime.project.id}`).findLast((event) => event.kind === 'browser.state_changed')?.payload).not.toHaveProperty('cookies');
 
+      const previewSession = {
+        id: 'browser-preview-1', profileId: 'profile-1', instanceId: 'workspace-preview:session-1', paneId: 'workspace-preview:pane-1',
+        surface: 'workspace_preview', url: 'about:blank', title: 'Preview', status: 'ready', authorizedDomains: [], observationRevision: 0, createdAt: now, updatedAt: now,
+      };
+      const previewBrowserResponse = await fetch(`${server.url}/api/browser/state`, {
+        method: 'POST', headers: jsonHeaders, body: JSON.stringify({ ...browserState, sessions: [...browserState.sessions, previewSession] }),
+      });
+      expect(previewBrowserResponse.status).toBe(200);
+      expect((await runtime.snapshot()).browserSessions).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'browser-preview-1', surface: 'workspace_preview', url: 'about:blank' })]));
+
+      const invalidPreviewBrowserResponse = await fetch(`${server.url}/api/browser/state`, {
+        method: 'POST', headers: jsonHeaders, body: JSON.stringify({ ...browserState, sessions: [{ ...previewSession, paneId: 'unscoped-pane' }] }),
+      });
+      expect(invalidPreviewBrowserResponse.status).toBe(400);
+
       const secretResponse = await fetch(`${server.url}/api/browser/state`, {
         method: 'POST', headers: jsonHeaders, body: JSON.stringify({ ...browserState, cookies: [{ value: 'secret' }] }),
       });
@@ -215,6 +243,10 @@ describe('protocol-v5 top-level worktable runtime', () => {
       const archiveResponse = await fetch(`${server.url}/api/worktable/instances/${instance.id}/archive`, { method: 'POST', headers: jsonHeaders });
       expect(archiveResponse.status).toBe(200);
       expect((await runtime.snapshot()).worktable.instances.find((candidate) => candidate.id === instance.id)?.status).toBe('archived');
+      const restoreResponse = await fetch(`${server.url}/api/worktable/instances/${instance.id}/restore`, { method: 'POST', headers: jsonHeaders });
+      expect(restoreResponse.status).toBe(200);
+      expect(await restoreResponse.json()).toMatchObject({ id: instance.id, status: 'idle' });
+      expect((await runtime.snapshot()).worktable.instances.find((candidate) => candidate.id === instance.id)?.status).toBe('idle');
     } finally {
       unsubscribe();
       await server.close();

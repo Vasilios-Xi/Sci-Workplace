@@ -1,4 +1,5 @@
 import type { ModelDescriptor, ModelEvent, ModelProvider, ModelRequest, ModelUsage, ToolDefinition } from '@openlab/protocol';
+import { ollamaChatContent } from './message-content.js';
 
 interface OllamaModelSummary {
   name?: string;
@@ -131,12 +132,16 @@ export class OllamaProvider implements ModelProvider {
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'Sci-Workplace/0.1.0' },
       body: JSON.stringify({
         model: nativeModel,
-        messages: request.messages.map((message) => ({
-          role: message.role,
-          content: message.content,
-          ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
-          ...(message.toolCalls ? { tool_calls: message.toolCalls.map((call) => ({ function: { name: call.name, arguments: parseToolArguments(call.arguments) } })) } : {}),
-        })),
+        messages: request.messages.map((message) => {
+          const content = ollamaChatContent(message.content);
+          return {
+            role: message.role,
+            content: content.content,
+            ...(content.images ? { images: content.images } : {}),
+            ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+            ...(message.toolCalls ? { tool_calls: message.toolCalls.map((call) => ({ function: { name: call.name, arguments: parseToolArguments(call.arguments) } })) } : {}),
+          };
+        }),
         ...(request.tools.length ? { tools: request.tools.map(toTool) } : {}),
         stream: true,
         think: isGptOss ? effort : request.thinking === 'enabled',

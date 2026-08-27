@@ -149,10 +149,10 @@ html, body, #root { background: var(--app-bg); }
 .composer { border-color: var(--line-strong); background: var(--input-bg); box-shadow: var(--shadow-sm); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), 0 7px 22px rgb(30 45 39 / 9%); }
 .composer textarea { color: var(--text); font-family: var(--reading-font-family); font-size: var(--reading-body-size); }
-.composer-plus__menu, .model-picker__menu, .reasoning-picker__menu { color: var(--text); border-color: var(--line-strong); background: var(--card-bg); box-shadow: var(--shadow-lg); }
+.composer-plus__menu, .model-picker__menu, .reasoning-picker__menu, .permission-picker__menu { color: var(--text); border-color: var(--line-strong); background: var(--card-bg); box-shadow: var(--shadow-lg); }
 .composer-plus__menu strong, .model-picker__group [role="option"], .reasoning-picker__menu [role="option"] { color: var(--text); }
 .composer-plus__menu small, .model-picker__group > header, .reasoning-picker__menu [role="option"] small { color: var(--subtle); }
-.composer-plus__menu > button:hover, .composer-plus__menu > label:hover, .model-picker__group [role="option"]:hover, .reasoning-picker__menu [role="option"]:hover { background: var(--hover-bg); }
+.composer-plus__menu > button:hover, .composer-plus__menu > label:hover, .model-picker__group [role="option"]:hover, .reasoning-picker__menu [role="option"]:hover, .permission-picker__menu [role="option"]:hover { background: var(--hover-bg); }
 .composer-control.model, .toolbar-select { background: var(--card-soft); }
 
 .user-message > .user-message__bubble { color: var(--text); background: var(--hover-bg); font-family: var(--reading-font-family); font-size: var(--reading-body-size); }
@@ -216,6 +216,134 @@ html, body, #root { background: var(--app-bg); }
 .settings-card, .provider-console, .agent-editor__hero, .agent-editor__policy-card, .agent-memory-editor, .agent-tools-editor { color: var(--text); border-color: var(--line); background: var(--card-bg); }
 .setting-row { border-color: var(--line); }
 .setting-control select, .setting-control input, .mcp-form input, .mcp-form select, .agent-editor input, .agent-editor select, .agent-editor textarea { color: var(--text); border-color: var(--line-strong); background: var(--input-bg); }
+.settings-content input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.settings-content select,
+.settings-content textarea { color: var(--text); border-color: var(--line-strong); background-color: var(--input-bg); }
+.settings-modal .button.secondary { color: var(--muted); border-color: var(--line-strong); background: var(--card-bg); }
+.settings-modal .button.secondary:hover { color: var(--text); background: var(--hover-bg); }
+
+/* Agent settings use theme surfaces instead of the legacy fixed light palette. */
+.agent-roster-card { color: var(--text); border-color: var(--line); background: var(--card-bg); box-shadow: var(--shadow-sm); }
+.agent-roster-card span,
+.agent-profile-hero span,
+.agent-profile-editor > footer span,
+.agent-runtime-limit p,
+.agent-memory-editor > header p,
+.agent-tools-editor > header p,
+.agent-tools-editor > header > span { color: var(--subtle); }
+.agent-avatar-stack button { border-color: var(--card-bg); background: var(--card-soft); }
+.agent-avatar-stack button.is-active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.agent-avatar-stack .agent-stack-add { color: var(--muted); border-color: var(--line-strong); background: var(--card-soft); }
+.agent-editor-tabs { background: var(--card-soft); }
+.agent-editor-tabs button { color: var(--muted); }
+.agent-editor-tabs button:hover { background: var(--hover-bg); }
+.agent-editor-tabs button.is-active { color: var(--accent-strong); background: var(--card-bg); box-shadow: var(--shadow-sm); }
+.agent-profile-hero { color: var(--text); border-color: var(--line); background: linear-gradient(120deg, var(--card-soft), var(--card-bg)); }
+.agent-profile-actions button { color: var(--muted); }
+.agent-profile-actions button:hover { color: var(--accent-strong); background: var(--hover-bg); }
+.agent-avatar-choice button.is-active { border-color: var(--accent); background: var(--accent-soft); }
+.agent-avatar-upload { color: var(--muted); border-color: var(--line-strong); background: var(--card-soft); }
+.agent-avatar-upload:hover { color: var(--text); border-color: var(--accent); background: var(--hover-bg); }
+.agent-profile-editor > label,
+.agent-profile-grid label,
+.agent-profile-grid .agent-model-field { color: var(--muted); }
+.agent-profile-editor input:focus,
+.agent-profile-editor textarea:focus,
+.agent-profile-editor select:focus { color: var(--text); border-color: var(--accent); background: var(--input-bg); box-shadow: 0 0 0 2px var(--accent-soft); }
+.agent-profile-editor > footer,
+.agent-memory-editor > header,
+.agent-tools-editor > header,
+.agent-memory-editor > nav,
+.memory-create,
+.memory-search,
+.agent-tools-editor > article { border-color: var(--line); }
+.agent-runtime-limit input,
+.memory-create textarea,
+.memory-create select,
+.memory-list textarea { color: var(--text); border-color: var(--line-strong); background: var(--input-bg); }
+.hana-toggle { background: var(--line-strong); }
+.hana-toggle span { background: var(--card-bg); }
+.hana-toggle.is-on { background: var(--accent); }
+.agent-memory-editor > nav button { color: var(--muted); }
+.agent-memory-editor > nav button.is-active { color: var(--accent-strong); background: var(--accent-soft); }
+.agent-memory-editor > nav em { background: var(--card-bg); }
+.memory-create,
+.agent-tools-editor > footer { background: var(--card-soft); }
+.memory-search button { color: var(--accent-strong); }
+.memory-search .danger-link { color: var(--danger); }
+.memory-list article { color: var(--text); border-color: var(--line); background: var(--card-bg); }
+.memory-list p,
+.memory-empty strong,
+.tool-definition-list label { color: var(--text); }
+.memory-list footer,
+.memory-empty,
+.tool-capability-row p,
+.tool-capability-row em,
+.tool-definition-list > span,
+.agent-tools-editor > footer { color: var(--subtle); }
+.memory-disabled-note { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--card-bg)); }
+.tool-expand { color: var(--muted); }
+.agent-create-backdrop { background: color-mix(in srgb, var(--text) 28%, transparent); }
+.agent-create-modal,
+.channel-create-modal { color: var(--text); border-color: var(--line-strong); background: var(--workspace-bg); box-shadow: var(--shadow-lg); }
+.agent-create-modal > header,
+.channel-create-modal > header,
+.agent-create-modal > footer,
+.channel-create-modal > footer { border-color: var(--line); background: var(--card-bg); }
+.agent-create-modal > header small,
+.channel-create-modal > header small,
+.agent-template-grid small,
+.agent-import-zone small { color: var(--subtle); }
+.agent-template-grid button { color: var(--text); border-color: var(--line); background: var(--card-bg); }
+.agent-template-grid button:hover { background: var(--hover-bg); }
+.agent-template-grid button.is-active { color: var(--accent-strong); border-color: var(--accent); background: var(--selected-bg); box-shadow: 0 0 0 2px var(--accent-soft); }
+.agent-import-zone { color: var(--muted); border-color: var(--line-strong); background: var(--card-soft); }
+
+/* Provider settings follow the same theme tokens as the surrounding modal. */
+.provider-console { border-color: var(--line); background: var(--card-bg); box-shadow: var(--shadow-sm); }
+.provider-list { color: var(--text); border-color: var(--line); background: var(--card-soft); }
+.provider-list h4 { color: var(--subtle); }
+.provider-list button { color: var(--muted); }
+.provider-list button:hover { color: var(--text); background: var(--hover-bg); }
+.provider-list button.is-active { color: var(--accent-strong); background: var(--selected-bg); box-shadow: inset 2px 0 var(--accent); }
+.provider-list button em { color: var(--subtle); }
+.provider-console > main { color: var(--text); background: var(--card-bg); }
+.provider-detail__header,
+.provider-connection-row,
+.provider-models article { border-color: var(--line); }
+.provider-detail__header h3,
+.provider-models article strong { color: var(--text); }
+.provider-detail__header p,
+.provider-status,
+.provider-config-actions > small,
+.provider-models article code,
+.provider-empty-models,
+.provider-routing-field small,
+.provider-routing > p { color: var(--subtle); }
+.provider-docs,
+.provider-power,
+.provider-refresh { color: var(--muted); border-color: var(--line-strong); background: var(--card-bg); }
+.provider-docs:hover,
+.provider-refresh:hover { color: var(--accent-strong); border-color: var(--accent); background: var(--hover-bg); }
+.provider-power:hover { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line-strong)); background: var(--hover-bg); }
+.provider-account { color: var(--semantic-success); background: color-mix(in srgb, var(--semantic-success) 12%, var(--card-bg)); }
+.provider-auth-card,
+.provider-config-card { color: var(--text); border-color: var(--line); background: var(--card-soft); }
+.provider-auth-card > div { color: var(--accent-strong); }
+.provider-auth-card strong,
+.provider-config-card > label > span { color: var(--text); }
+.provider-auth-card small,
+.provider-config-card > label > span small { color: var(--subtle); }
+.provider-input { color: var(--subtle); border-color: var(--line-strong); background: var(--input-bg); }
+.provider-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.provider-input input,
+.provider-input input[readonly] { color: var(--text); background: transparent; }
+.provider-input button { color: var(--subtle); }
+.provider-policy { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--card-bg)); }
+.provider-policy--quiet { color: var(--semantic-info); background: color-mix(in srgb, var(--semantic-info) 10%, var(--card-bg)); }
+.provider-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--card-bg)); }
+.provider-models > header span { color: var(--subtle); background: var(--card-soft); }
+.provider-routing-field > span { color: var(--text); }
 
 .channels-view { color: var(--text); }
 .channel-list-pane, .channel-details-pane { border-color: var(--line); background: var(--sidebar-bg); }

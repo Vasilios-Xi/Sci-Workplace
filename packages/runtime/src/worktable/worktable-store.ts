@@ -323,6 +323,22 @@ export class WorktableStore {
     return instance;
   }
 
+  restore(instanceId: string, actor: EventActor, ifRevision?: number): WorktableInstance {
+    const current = this.requireInstance(instanceId);
+    if (current.status !== 'archived') throw new Error('只有已归档工作台可以恢复');
+    if (ifRevision !== undefined && ifRevision !== current.revision) throw new Error('工作台实例已被其他操作更新，请刷新后重试');
+    const restored: WorktableInstance = {
+      ...current,
+      status: 'idle',
+      revision: current.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    delete restored.archivedAt;
+    this.replace(restored);
+    this.record('worktable.restored', actor, instanceId);
+    return structuredClone(restored);
+  }
+
   mountTab(instanceId: string, paneId: string, input: { title: string; content: WorktableContent; pinned?: boolean }, actor: EventActor): WorktableTab {
     const instance = this.requireMutableInstance(instanceId);
     if (instance.panes.flatMap((pane) => pane.tabs).length >= MAX_WORKTABLE_TABS) throw new Error(`单个工作台最多打开 ${MAX_WORKTABLE_TABS} 个标签`);

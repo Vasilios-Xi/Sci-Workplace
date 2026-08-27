@@ -141,6 +141,13 @@ export class AgentStore {
     return definition ? structuredClone(definition) : undefined;
   }
 
+  ensureProjectHasAgent(actor: EventActor = SYSTEM_ACTOR): ProjectAgentBinding | undefined {
+    const current = this.projectBindings().find((binding) => binding.enabled && this.#definitions.get(binding.agentId)?.status === 'active');
+    if (current) return current;
+    const candidate = this.definitions(false)[0];
+    return candidate ? this.setProjectEnabled(candidate.id, true, undefined, actor) : undefined;
+  }
+
   create(input: CreateAgentInput, actor: EventActor = USER_ACTOR): AgentDefinition {
     const template = this.templates().find((candidate) => candidate.id === (input.templateId ?? 'research_lead')) ?? CORE_AGENT_TEMPLATES[0]!;
     const now = new Date().toISOString();
@@ -277,19 +284,24 @@ export class AgentStore {
     return this.ensureSessionBinding(sessionId);
   }
 
-  setSessionBinding(sessionId: string, leadAgentId: string, memberAgentIds: string[], options: { hasMessages: boolean; actor?: EventActor }): SessionAgentBinding {
-    const current = this.ensureSessionBinding(sessionId);
+  validateSessionAgents(leadAgentId: string, memberAgentIds: string[]): { leadAgentId: string; memberAgentIds: string[] } {
     const lead = this.requireEnabledForProject(leadAgentId);
-    if (options.hasMessages && current.leadAgentId && current.leadAgentId !== lead.id) throw new Error('首轮消息后更换主管需要新建或分支对话');
     const members = normalizeStringList(memberAgentIds, 5).filter((id) => id !== lead.id);
     for (const id of members) this.requireEnabledForProject(id);
+    return { leadAgentId: lead.id, memberAgentIds: members };
+  }
+
+  setSessionBinding(sessionId: string, leadAgentId: string, memberAgentIds: string[], options: { hasMessages: boolean; actor?: EventActor }): SessionAgentBinding {
+    const validated = this.validateSessionAgents(leadAgentId, memberAgentIds);
+    const current = this.ensureSessionBinding(sessionId);
+    if (options.hasMessages && current.leadAgentId && current.leadAgentId !== validated.leadAgentId) throw new Error('首轮消息后更换主管需要新建或分支对话');
     const binding: SessionAgentBinding = {
       sessionId,
-      leadAgentId: lead.id,
-      memberAgentIds: members,
+      leadAgentId: validated.leadAgentId,
+      memberAgentIds: validated.memberAgentIds,
       capabilitySnapshotIds: current.capabilitySnapshotIds.filter((id) => {
         const snapshot = this.#snapshots.get(id);
-        return snapshot && [lead.id, ...members].includes(snapshot.agentId);
+        return snapshot && [validated.leadAgentId, ...validated.memberAgentIds].includes(snapshot.agentId);
       }),
       updatedAt: new Date().toISOString(),
     };
@@ -320,7 +332,7 @@ export class AgentStore {
     return snapshot ? structuredClone(snapshot) : undefined;
   }
 
-  private requireEnabledForProject(agentId: string): AgentDefinition {
+  requireEnabledForProject(agentId: string): AgentDefinition {
     const definition = this.requireDefinition(agentId);
     if (!this.#projectBindings.get(agentId)?.enabled) throw new Error(`Agent 未在当前项目启用：${agentId}`);
     return definition;

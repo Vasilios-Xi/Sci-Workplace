@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import type { ModelDescriptor, ModelProviderId } from '@openlab/protocol';
 import { useFloatingPosition } from '../lib/floating-position.js';
+import type { FloatingPlacement } from '../lib/floating-position.js';
 
 type ProviderGroupId = ModelProviderId | 'openlab';
 
@@ -65,17 +66,44 @@ interface ModelPickerProps {
   label: string;
   onChange(value: string): void;
   onOpen?(): void;
+  variant?: 'composer' | 'field';
+  placement?: FloatingPlacement;
+  testId?: string;
+  menuTestId?: string;
+  disabled?: boolean;
 }
 
-export function ModelPicker({ models, value, label, onChange, onOpen }: ModelPickerProps) {
+function includeCurrentModel(models: ModelDescriptor[], value: string): ModelDescriptor[] {
+  const unique = new Map(models.map((model) => [model.id, model]));
+  if (value && !unique.has(value)) unique.set(value, {
+    id: value,
+    label: value,
+    contextWindow: 0,
+    supportsThinking: false,
+    supportsTools: false,
+    supportsVision: false,
+  });
+  return [...unique.values()];
+}
+
+export function ModelPicker({
+  models, value, label, onChange, onOpen, variant = 'composer', placement,
+  testId = 'model-picker', menuTestId = 'model-picker-menu', disabled = false,
+}: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
-  const groups = useMemo(() => groupModelsByProvider(models), [models]);
-  const selected = models.find((model) => model.id === value) ?? models[0];
-  const menuStyle = useFloatingPosition({ open, anchorRef: triggerRef, surfaceRef: menuRef, placement: 'top-end' });
+  const availableModels = useMemo(() => includeCurrentModel(models, value), [models, value]);
+  const groups = useMemo(() => groupModelsByProvider(availableModels), [availableModels]);
+  const selected = availableModels.find((model) => model.id === value) ?? availableModels[0];
+  const menuStyle = useFloatingPosition({
+    open,
+    anchorRef: triggerRef,
+    surfaceRef: menuRef,
+    placement: placement ?? (variant === 'field' ? 'bottom-start' : 'top-end'),
+  });
 
   const close = (restoreFocus = false) => {
     setOpen(false);
@@ -127,17 +155,18 @@ export function ModelPicker({ models, value, label, onChange, onOpen }: ModelPic
 
   return <div
     ref={rootRef}
-    className={`composer-control model model-picker ${open ? 'is-open' : ''}`}
+    className={`${variant === 'composer' ? 'composer-control model ' : ''}model-picker model-picker--${variant} ${open ? 'is-open' : ''}`}
   >
     <button
       ref={triggerRef}
       type="button"
       className="model-picker__trigger"
-      data-testid="model-picker"
+      data-testid={testId}
       aria-label={label}
       aria-haspopup="listbox"
       aria-expanded={open}
       aria-controls={open ? menuId : undefined}
+      disabled={disabled}
       title={selected?.label ?? label}
       onClick={() => open ? close() : openMenu()}
       onKeyDown={(event) => {
@@ -155,7 +184,7 @@ export function ModelPicker({ models, value, label, onChange, onOpen }: ModelPic
       id={menuId}
       className="model-picker__menu"
       style={menuStyle}
-      data-testid="model-picker-menu"
+      data-testid={menuTestId}
       role="listbox"
       aria-label={label}
       onKeyDown={handleMenuKeyDown}

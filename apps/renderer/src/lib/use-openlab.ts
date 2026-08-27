@@ -1,8 +1,8 @@
-import { t, tf } from "./../i18n/zh-CN.js";
+import { chatShellZhCN as shellCopy, t, tf } from "./../i18n/zh-CN.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
     AgentCardExport, AgentDefinition, AgentDefinitionUpdate, AgentMemoryItem, AgentToolPolicy, Annotation, AnnotationSelector, ArtifactProvenance, ArtifactRevisionFile, BootstrapSnapshot, ChatAttachmentRef, CollaborationChannel, DocumentBuffer, DocumentRevisionRef, HarnessSettings, JobRecord, JobSpec, JsonValue, ModelProviderConfig, ModelProviderId, PermissionMode, PluginManifest, PrimaryAgentProfileUpdate, ProviderOAuthStartResult, ReasoningEffort, ResourceHandle, ServerPushMessage, SourceMapDescriptor,
-    BrowserObservation, BrowserProfileSummary, BrowserSessionSummary, SessionSummary, TurnVariantGroup, WorkspaceEditGroup, WorkspaceEditPreview, WorkspaceEditRequest, WorkspaceEntry, WorkspacePathRef, WorkspacePreview, WorkspaceRootSummary, WorkspaceSearchResult, WorkbenchState,
+    BrowserObservation, BrowserProfileSummary, BrowserSessionSummary, DesktopConversationStartInput, DesktopConversationStartResult, SessionSummary, TurnVariantGroup, UserProfileUpdate, WorkspaceAccessMode, WorkspaceEditGroup, WorkspaceEditPreview, WorkspaceEditRequest, WorkspaceEntry, WorkspacePathRef, WorkspacePreview, WorkspaceRootSummary, WorkspaceSearchResult, WorkbenchState,
     WorktableContent, WorktableDeviceUiState, WorktableInstance, WorktablePane, WorktableRevealTarget, WorktableSplitNode, WorktableState, WorktableTab,
 } from '@openlab/protocol';
 import type { McpServerConfig } from '@openlab/protocol';
@@ -12,8 +12,17 @@ import { confirmInApp } from '../components/AppDialog.js';
 function applyMessage(snapshot: BootstrapSnapshot, message: ServerPushMessage): BootstrapSnapshot {
     if (message.type === 'snapshot')
         return message.snapshot;
-    if (message.type === 'sessions.changed')
-        return { ...snapshot, sessions: message.sessions, activeSessionId: message.activeSessionId };
+    if (message.type === 'sessions.changed') {
+        const currentProjectIds = new Set(message.sessions.map((session) => session.projectId));
+        const retained = (snapshot.sessionCatalog ?? snapshot.sessions).filter((session) => !currentProjectIds.has(session.projectId));
+        return {
+            ...snapshot,
+            sessions: message.sessions,
+            sessionCatalog: [...message.sessions.filter((session) => !session.temporary), ...retained]
+                .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+            activeSessionId: message.activeSessionId,
+        };
+    }
     if (message.type === 'timeline.append')
         return { ...snapshot, timeline: [...snapshot.timeline, message.node] };
     if (message.type === 'timeline.patch')
@@ -28,6 +37,8 @@ function applyMessage(snapshot: BootstrapSnapshot, message: ServerPushMessage): 
         return { ...snapshot, providers: message.providers, models: message.models };
     if (message.type === 'profile.changed')
         return { ...snapshot, primaryAgent: message.profile };
+    if (message.type === 'user-profile.changed')
+        return { ...snapshot, userProfile: message.profile };
     if (message.type === 'agent-definitions.changed')
         return { ...snapshot, agentDefinitions: message.definitions, projectAgents: message.projectAgents };
     if (message.type === 'session-agents.changed')
@@ -77,29 +88,87 @@ export function useOpenLab() {
     const [error, setError] = useState<string>();
     const [capabilityNotice, setCapabilityNotice] = useState<{ revision: number; reason: string }>();
     const mounted = useRef(true);
+    const socketDispose = useRef<(() => void) | undefined>(undefined);
+    const connectionGeneration = useRef(0);
     useEffect(() => {
         mounted.current = true;
+        const generation = ++connectionGeneration.current;
         let dispose: (() => void) | undefined;
-        void (async () => {
+        let retry: number | undefined;
+        let stopped = false;
+        const initialize = async () => {
             try {
                 const connection = await client.connect();
                 const initial = await client.bootstrap();
-                if (!mounted.current)
+                if (stopped || !mounted.current || generation !== connectionGeneration.current)
                     return;
                 setSnapshot(initial);
                 setProjectFolderSelected(connection.projectFolderSelected);
                 setPreview(false);
+                setError(undefined);
                 dispose = await client.socket((message) => {
+                    if (stopped || !mounted.current || generation !== connectionGeneration.current) return;
                     if (message.type === 'capabilities.changed') setCapabilityNotice({ revision: message.revision, reason: message.reason });
                     setSnapshot((current) => applyMessage(current, message));
-                }, setConnected);
+                }, (value) => { if (!stopped && mounted.current && generation === connectionGeneration.current) setConnected(value); });
+                if (stopped || generation !== connectionGeneration.current) dispose();
+                else socketDispose.current = dispose;
             }
             catch (cause) {
+                if (stopped || !mounted.current || generation !== connectionGeneration.current)
+                    return;
+                client.resetConnection();
+                setConnected(false);
                 setError(cause instanceof Error ? cause.message : String(cause));
                 setPreview(true);
+                retry = window.setTimeout(() => {
+                    retry = undefined;
+                    void initialize();
+                }, 800);
             }
-        })();
-        return () => { mounted.current = false; dispose?.(); };
+        };
+        void initialize();
+        return () => {
+            stopped = true;
+            mounted.current = false;
+            connectionGeneration.current++;
+            if (retry !== undefined)
+                window.clearTimeout(retry);
+            const activeSocket = socketDispose.current;
+            socketDispose.current = undefined;
+            activeSocket?.();
+            if (dispose && activeSocket !== dispose) dispose();
+        };
+    }, [client]);
+    const replaceConnection = useCallback(async (connection: OpenLabConnection, preparedSnapshot?: BootstrapSnapshot) => {
+        const generation = ++connectionGeneration.current;
+        const previousSocket = socketDispose.current;
+        socketDispose.current = undefined;
+        previousSocket?.();
+        client.replaceConnection(connection);
+        try {
+            const initial = preparedSnapshot ?? await client.bootstrap();
+            if (!mounted.current || generation !== connectionGeneration.current) return;
+            setSnapshot(initial);
+            setProjectFolderSelected(connection.projectFolderSelected);
+            setPreview(false);
+            setError(undefined);
+            const dispose = await client.socket((message) => {
+                if (!mounted.current || generation !== connectionGeneration.current) return;
+                if (message.type === 'capabilities.changed') setCapabilityNotice({ revision: message.revision, reason: message.reason });
+                setSnapshot((current) => applyMessage(current, message));
+            }, (value) => {
+                if (mounted.current && generation === connectionGeneration.current) setConnected(value);
+            });
+            if (!mounted.current || generation !== connectionGeneration.current) dispose();
+            else socketDispose.current = dispose;
+        } catch (cause) {
+            if (!mounted.current || generation !== connectionGeneration.current) return;
+            client.resetConnection();
+            setConnected(false);
+            setError(cause instanceof Error ? cause.message : String(cause));
+            throw cause;
+        }
     }, [client]);
     const refresh = useCallback(async () => {
         const next = await client.bootstrap();
@@ -110,7 +179,8 @@ export function useOpenLab() {
         model?: string;
         thinking?: 'enabled' | 'disabled';
         reasoningEffort?: ReasoningEffort;
-        permissionMode?: 'read_only' | 'ask' | 'trusted';
+        permissionMode?: PermissionMode;
+        interfaceLocale?: string;
         skillIds?: string[];
         attachments?: ChatAttachmentRef[];
         researchObjectIds?: string[];
@@ -135,11 +205,11 @@ export function useOpenLab() {
         if (!preview)
             await client.request('/api/chat/cancel', { method: 'POST', body: '{}' });
     }, [client, preview]);
-    const createSession = useCallback(async (leadAgentId?: string, memberAgentIds: string[] = []): Promise<SessionSummary | undefined> => {
+    const createSession = useCallback(async (leadAgentId?: string, memberAgentIds: string[] = [], temporary = false): Promise<SessionSummary | undefined> => {
         if (preview) {
             const now = new Date().toISOString();
             const id = crypto.randomUUID();
-            const session: SessionSummary = { id, projectId: snapshot.project.id, title: t("copy001"), status: 'idle', updatedAt: now, model: snapshot.models[0]?.id ?? '' };
+            const session: SessionSummary = { id, projectId: snapshot.project.id, title: temporary ? shellCopy.titlebar.temporaryChat : t("copy001"), status: 'idle', updatedAt: now, model: snapshot.models[0]?.id ?? '', ...(temporary ? { temporary: true } : {}) };
             setSnapshot((current) => ({
                 ...current,
                 sessions: [...current.sessions, session],
@@ -159,18 +229,25 @@ export function useOpenLab() {
             }));
             return session;
         }
-        const created = await client.request<SessionSummary>('/api/sessions', { method: 'POST', body: JSON.stringify({ title: t("copy001"), ...(leadAgentId ? { leadAgentId } : {}), memberAgentIds }) });
+        const created = await client.request<SessionSummary>('/api/sessions', { method: 'POST', body: JSON.stringify({ title: temporary ? shellCopy.titlebar.temporaryChat : t("copy001"), ...(leadAgentId ? { leadAgentId } : {}), memberAgentIds, temporary }) });
         await refresh();
         return created;
     }, [client, preview, refresh, snapshot.models, snapshot.project.id]);
+    const startConversation = useCallback(async (input: DesktopConversationStartInput): Promise<DesktopConversationStartResult> => {
+        if (!window.openlab || preview) throw new Error(shellCopy.runtimeUnavailableForConversation);
+        const started = await window.openlab.startConversation(input);
+        await replaceConnection(started.connection, started.snapshot);
+        return started;
+    }, [preview, replaceConnection]);
     const switchSession = useCallback(async (id: string) => {
         if (preview) {
             setSnapshot((current) => ({ ...current, activeSessionId: id }));
             return;
         }
-        await client.request(`/api/sessions/${id}/activate`, { method: 'POST', body: '{}' });
-        await refresh();
-    }, [client, preview, refresh]);
+        const next = await client.request<BootstrapSnapshot>(`/api/sessions/${id}/activate`, { method: 'POST', body: '{}' });
+        setSnapshot(next);
+        setPreview(false);
+    }, [client, preview]);
     const archiveSession = useCallback(async (id: string) => {
         if (preview) {
             setSnapshot((current) => {
@@ -196,6 +273,14 @@ export function useOpenLab() {
             return;
         await client.request(`/api/sessions/${id}/fork`, { method: 'POST', body: JSON.stringify({ ...(throughNodeId ? { throughNodeId } : {}) }) });
         await refresh();
+    }, [client, preview, refresh]);
+
+    const forkSessionBefore = useCallback(async (id: string, beforeNodeId: string): Promise<SessionSummary | undefined> => {
+        if (preview)
+            return undefined;
+        const created = await client.request<SessionSummary>(`/api/sessions/${id}/fork`, { method: 'POST', body: JSON.stringify({ beforeNodeId }) });
+        await refresh();
+        return created;
     }, [client, preview, refresh]);
 
     const regenerateTurn = useCallback(async (turnId: string) => {
@@ -237,7 +322,7 @@ export function useOpenLab() {
         await client.request(`/api/workspace/roots/${encodeURIComponent(rootId)}/revoke`, { method: 'POST', body: JSON.stringify({ confirmed: true }) });
         await refresh();
     }, [client, preview, refresh]);
-    const authorizeWorkspaceRoot = useCallback(async (access: PermissionMode): Promise<WorkspaceRootSummary | undefined> => {
+    const authorizeWorkspaceRoot = useCallback(async (access: WorkspaceAccessMode): Promise<WorkspaceRootSummary | undefined> => {
         if (!window.openlab || preview) return undefined;
         const root = await window.openlab.authorizeWorkspaceRoot(access);
         if (root) await refresh();
@@ -252,8 +337,11 @@ export function useOpenLab() {
         await client.request(`/api/workspace/files/${encodeURIComponent(id)}/undo`, { method: 'POST', body: '{}' });
         await refresh();
     }, [client, refresh]);
-    const addConversationFile = useCallback(async (ref: WorkspacePathRef) => {
-        await client.request('/api/workspace/conversation-files', { method: 'POST', body: JSON.stringify({ ref, origin: 'reference' }) });
+    const addConversationFile = useCallback(async (ref: WorkspacePathRef, origin: 'upload' | 'reference' | 'agent' | 'artifact' = 'reference') => {
+        await client.request('/api/workspace/conversation-files', { method: 'POST', body: JSON.stringify({ ref, origin }) });
+    }, [client]);
+    const removeConversationFile = useCallback(async (id: string) => {
+        await client.request(`/api/workspace/conversation-files/${encodeURIComponent(id)}`, { method: 'DELETE' });
     }, [client]);
     const openWorkbench = useCallback(async (input: { title: string; workbenchId: string; document?: DocumentRevisionRef; artifactId?: string; artifactRevisionId?: string; activeViewId?: string }): Promise<WorkbenchState> => {
         if (preview) {
@@ -348,6 +436,17 @@ export function useOpenLab() {
         if (preview) return await updateWorktableInstance(id, { status: 'archived' });
         return mergeWorktableInstance(await client.request<WorktableInstance>(`/api/worktable/instances/${encodeURIComponent(id)}/archive`, { method: 'POST', body: '{}' }));
     }, [client, mergeWorktableInstance, preview, updateWorktableInstance]);
+    const restoreWorktableInstance = useCallback(async (id: string): Promise<WorktableInstance> => {
+        if (preview) {
+            const current = snapshot.worktable.instances.find((candidate) => candidate.id === id);
+            if (!current || current.status !== 'archived') throw new Error('Worktable instance is not archived');
+            const { archivedAt: _archivedAt, ...rest } = current;
+            const restored: WorktableInstance = { ...rest, status: 'idle', revision: current.revision + 1, updatedAt: new Date().toISOString() };
+            setSnapshot((value) => ({ ...value, worktable: { ...value.worktable, instances: value.worktable.instances.map((candidate) => candidate.id === id ? restored : candidate) } }));
+            return restored;
+        }
+        return mergeWorktableInstance(await client.request<WorktableInstance>(`/api/worktable/instances/${encodeURIComponent(id)}/restore`, { method: 'POST', body: '{}' }));
+    }, [client, mergeWorktableInstance, preview, snapshot.worktable.instances]);
     const setWorktableLayout = useCallback(async (id: string, layout: WorktableSplitNode, panes: WorktablePane[], activePaneId?: string): Promise<WorktableInstance> => {
         if (preview) return await updateWorktableInstance(id, { layout, panes, ...(activePaneId ? { activePaneId } : {}) });
         return mergeWorktableInstance(await client.request<WorktableInstance>(`/api/worktable/instances/${encodeURIComponent(id)}/layout`, { method: 'POST', body: JSON.stringify({ layout, panes, ...(activePaneId ? { activePaneId } : {}) }) }));
@@ -399,7 +498,7 @@ export function useOpenLab() {
         await syncBrowserBridge();
         return created;
     }, [preview, snapshot.project.id, syncBrowserBridge]);
-    const openBrowserSession = useCallback(async (input: { profileId: string; instanceId: string; paneId: string; url?: string }): Promise<BrowserSessionSummary | undefined> => {
+    const openBrowserSession = useCallback(async (input: { profileId: string; instanceId: string; paneId: string; surface?: 'worktable' | 'workspace_preview'; url?: string }): Promise<BrowserSessionSummary | undefined> => {
         if (!window.openlab || preview) return undefined;
         const opened = await window.openlab.browser.open({ ...input, projectId: snapshot.project.id, url: input.url ?? 'https://', confirmed: true });
         await syncBrowserBridge();
@@ -418,6 +517,11 @@ export function useOpenLab() {
             await syncBrowserBridge();
             return result as unknown as JsonValue;
         }
+        if (input.action === 'back' || input.action === 'forward' || input.action === 'reload') {
+            const result = await window.openlab.browser.history({ sessionId, action: input.action });
+            await syncBrowserBridge();
+            return result as unknown as JsonValue;
+        }
         if (typeof input.observationId !== 'string' || !['click', 'type', 'select', 'press', 'scroll'].includes(String(input.action))) return undefined;
         const result = await window.openlab.browser.act({ sessionId, observationId: input.observationId, action: input.action as 'click' | 'type' | 'select' | 'press' | 'scroll', ...(typeof input.ref === 'string' ? { ref: input.ref } : {}), ...(typeof input.value === 'string' ? { value: input.value } : {}), confirmed: input.confirmed === true });
         await syncBrowserBridge();
@@ -425,7 +529,13 @@ export function useOpenLab() {
     }, [preview, syncBrowserBridge]);
     const setBrowserBounds = useCallback(async (sessionId: string, bounds: { x: number; y: number; width: number; height: number }, visible: boolean): Promise<void> => { if (window.openlab && !preview) await window.openlab.browser.setBounds({ sessionId, bounds, visible }); }, [preview]);
     const hideAllBrowsers = useCallback(async (): Promise<void> => { if (window.openlab && !preview) await window.openlab.browser.hideAll(); }, [preview]);
+    const closeBrowserSession = useCallback(async (sessionId: string): Promise<void> => {
+        if (!window.openlab || preview) return;
+        await window.openlab.browser.close(sessionId);
+        await syncBrowserBridge();
+    }, [preview, syncBrowserBridge]);
     const terminalAction = useCallback(async (instanceId: string, paneId: string, input: Record<string, unknown>): Promise<JsonValue | undefined> => preview ? undefined : await client.request(`/api/worktable/instances/${encodeURIComponent(instanceId)}/panes/${encodeURIComponent(paneId)}/terminal`, { method: 'POST', body: JSON.stringify(input) }), [client, preview]);
+    const previewTerminalAction = useCallback(async (terminalId: string, input: Record<string, unknown>): Promise<JsonValue | undefined> => preview ? undefined : await client.request(`/api/terminal/previews/${encodeURIComponent(terminalId)}`, { method: 'POST', body: JSON.stringify(input) }), [client, preview]);
     const scmAction = useCallback(async (instanceId: string, input: Record<string, unknown>): Promise<JsonValue | undefined> => preview ? undefined : await client.request(`/api/worktable/instances/${encodeURIComponent(instanceId)}/scm`, { method: 'POST', body: JSON.stringify(input) }), [client, preview]);
     const loadGeneratedApp = useCallback(async (appId: string, revisionId: string): Promise<{ url: string } | undefined> => preview ? undefined : await client.request(`/api/generated-apps/${encodeURIComponent(appId)}/revisions/${encodeURIComponent(revisionId)}/ticket`, { method: 'POST', body: '{}' }), [client, preview]);
     const getWorktableUiState = useCallback(async (instanceId: string): Promise<WorktableDeviceUiState | undefined> => preview ? undefined : await window.openlab?.getWorktableUiState(instanceId), [preview]);
@@ -482,6 +592,7 @@ export function useOpenLab() {
         }
         const endpoint = kind === 'skill' ? '/api/skills/install' : '/api/plugins/install';
         await client.request(endpoint, { method: 'POST', body: JSON.stringify({ sourcePath, scope, confirmed: true }) });
+        await window.openlab.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh]);
     const installSkillSource = useCallback(async (sourcePath: string) => {
@@ -551,6 +662,7 @@ export function useOpenLab() {
         }
         else
             await client.request(`/api/plugins/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ confirmed: true }) });
+        await window.openlab?.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh, snapshot.plugins]);
     const updateSettings = useCallback(async (patch: Partial<HarnessSettings>) => {
@@ -568,6 +680,28 @@ export function useOpenLab() {
             method: 'POST',
             body: JSON.stringify({ ...update, confirmed: true }),
         });
+        await window.openlab?.invalidateInactiveRuntimes();
+        await refresh();
+    }, [client, preview, refresh]);
+    const updateUserProfile = useCallback(async (update: UserProfileUpdate) => {
+        if (preview) {
+            setSnapshot((current) => {
+                const avatar = update.avatar === null
+                    ? {}
+                    : update.avatar
+                        ? { avatar: update.avatar }
+                        : current.userProfile?.avatar
+                            ? { avatar: current.userProfile.avatar }
+                            : {};
+                return { ...current, userProfile: { name: update.name.trim() || shellCopy.sidebar.defaultUserName, profile: update.profile.trim(), ...avatar, updatedAt: new Date().toISOString() } };
+            });
+            return;
+        }
+        await client.request('/api/settings/user-profile', {
+            method: 'POST',
+            body: JSON.stringify({ ...update, confirmed: true }),
+        });
+        await window.openlab?.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh]);
     const createAgent = useCallback(async (input: { name: string; avatar?: AgentDefinition['avatar']; templateId?: AgentDefinition['templateId']; identity?: string; instructions?: string; model?: string; reasoningEffort?: ReasoningEffort }) => {
@@ -675,25 +809,33 @@ export function useOpenLab() {
             method: 'POST',
             body: JSON.stringify({ ...patch, ...(credentialId ? { credentialId } : {}) }),
         });
+        await window.openlab?.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh]);
     const refreshProvider = useCallback(async (id: ModelProviderId) => {
         if (preview) return;
         await client.request(`/api/providers/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: '{}' });
+        await window.openlab?.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh]);
     const startProviderOAuth = useCallback(async (id: Extract<ModelProviderId, 'chatgpt-oauth' | 'grok-oauth'>): Promise<ProviderOAuthStartResult | undefined> => {
         if (preview) return undefined;
         const result = await client.request<ProviderOAuthStartResult>(`/api/providers/${encodeURIComponent(id)}/oauth/start`, { method: 'POST', body: '{}' });
+        await window.openlab?.invalidateInactiveRuntimes();
         if (result.authUrl) await window.openlab?.openExternal(result.authUrl);
         for (const delay of [2_000, 5_000, 10_000, 20_000]) {
-            window.setTimeout(() => { void client.request(`/api/providers/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: '{}' }).then(refresh).catch(() => undefined); }, delay);
+            window.setTimeout(() => {
+                void client.request(`/api/providers/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: '{}' })
+                    .then(async () => { await window.openlab?.invalidateInactiveRuntimes(); await refresh(); })
+                    .catch(() => undefined);
+            }, delay);
         }
         return result;
     }, [client, preview, refresh]);
     const logoutProviderOAuth = useCallback(async (id: Extract<ModelProviderId, 'chatgpt-oauth' | 'grok-oauth'>) => {
         if (preview) return;
         await client.request(`/api/providers/${encodeURIComponent(id)}/oauth/logout`, { method: 'POST', body: '{}' });
+        await window.openlab?.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh]);
     const updatePluginSettings = useCallback(async (id: string, value: JsonValue) => {
@@ -704,20 +846,20 @@ export function useOpenLab() {
     }, [client, preview, refresh]);
     return {
         snapshot, connected, preview, projectFolderSelected, error, capabilityNotice, dismissCapabilityNotice: () => setCapabilityNotice(undefined),
-        send, approve, cancel, createSession, switchSession, archiveSession, unarchiveSession, forkSession, regenerateTurn, activateTurnVariant,
+        send, approve, cancel, createSession, startConversation, switchSession, archiveSession, unarchiveSession, forkSession, forkSessionBefore, regenerateTurn, activateTurnVariant,
         listWorkspace, searchWorkspace, previewWorkspace, createWorkspaceAttachment, saveWorkspaceNote, activateWorkspaceRoot, confirmWorkspaceRoot, revokeWorkspaceRoot,
-        authorizeWorkspaceRoot, operateWorkspaceFile, undoWorkspaceFile, addConversationFile,
+        authorizeWorkspaceRoot, operateWorkspaceFile, undoWorkspaceFile, addConversationFile, removeConversationFile,
         openWorkbench, closeWorkbench, activateWorkbench, setWorkbenchView, maximizeWorkbench,
-        createWorktableInstance, activateWorktableInstance, updateWorktableInstance, archiveWorktableInstance, setWorktableLayout, mountWorktableContent, activateWorktableTab, closeWorktableTab,
-        createBrowserProfile, openBrowserSession, browserObserve, browserAction, setBrowserBounds, hideAllBrowsers, terminalAction, scmAction, loadGeneratedApp, getWorktableUiState, saveWorktableUiState,
+        createWorktableInstance, activateWorktableInstance, updateWorktableInstance, archiveWorktableInstance, restoreWorktableInstance, setWorktableLayout, mountWorktableContent, activateWorktableTab, closeWorktableTab,
+        createBrowserProfile, openBrowserSession, browserObserve, browserAction, setBrowserBounds, hideAllBrowsers, closeBrowserSession, terminalAction, previewTerminalAction, scmAction, loadGeneratedApp, getWorktableUiState, saveWorktableUiState,
         openDocument, updateDocument, saveDocument, closeDocument, previewWorkspaceEdit, applyWorkspaceEdit, undoWorkspaceEdit,
         openResource, readResource, resourceAccess, releaseResource, createAnnotation, updateAnnotation, submitAnnotations,
         runJob, cancelJob, pauseJob, resumeJob, jobLog, createArtifactRevision, archiveArtifactRevision, registerSourceMap, installToolchain,
         agentAction, messageAgent, installExtension, installSkillSource, approveSkill, configureMcp, mcpAction, loadPluginPanel, pluginPanelContext, pluginPanelTool, pluginPanelReveal, pluginAction, updateSettings, updatePluginSettings,
-        configurePrimaryAgent, createAgent, updateAgent, archiveAgentDefinition, importAgent, exportAgent, setSessionAgents, refreshAgentTools, setAgentToolPolicy, setProjectAgentCapabilities,
+        configurePrimaryAgent, updateUserProfile, createAgent, updateAgent, archiveAgentDefinition, importAgent, exportAgent, setSessionAgents, refreshAgentTools, setAgentToolPolicy, setProjectAgentCapabilities,
         listMemories, createMemory, updateMemory, deleteMemory, clearMemories,
         createChannel, activateChannel, updateChannel, archiveChannel, exportChannel,
-        configureProvider, refreshProvider, startProviderOAuth, logoutProviderOAuth, refresh,
+        configureProvider, refreshProvider, startProviderOAuth, logoutProviderOAuth, refresh, replaceConnection,
     };
 }
 

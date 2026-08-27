@@ -33,7 +33,7 @@ README.md
 }
 ```
 
-上述示例是兼容的 Plugin API v1。新科研工作台应使用 `schemaVersion: 2`、`apiVersion: 2` 和能力型权限：`workspace:read/edit`、`resources:read`、`jobs:run`、`models:run`、`annotations:read/write`、`artifacts:write`、`research:read/write`、`plugin-storage`、`settings:read`、`ui`。完整 v2 宿主方法、工作流与沙箱桥见 [Plugin API v2 契约](plugin-sdk-v2-workbench.md)。
+上述示例是兼容的 Plugin API v1。新 Worktable 插件应使用 `schemaVersion: 3`、`apiVersion: 3` 和能力型权限；旧 Workbench 插件仍可使用 v2。完整宿主方法、工作流与沙箱桥见 [Plugin API 契约](PLUGIN_API_CONTRACT.md)。
 
 v1 的 `project:read/write`、`process:spawn`、`network` 与设置权限继续兼容。权限变化、首次安装、重新启用和热重载都需要用户确认；任何 manifest 权限都不能绕过工具审批。
 
@@ -110,7 +110,7 @@ Runtime 暴露的工具名为长度受限的 `plugin__<plugin_id>__<tool_name>`�
 
 ## 7. UI 面板
 
-`uiPanels` contribution 由独立面板宿主加载。Runtime 校验入口的 realpath 必须位于插件目录内并注入严格 CSP；renderer 通过 `srcDoc` 放入不带 `allow-same-origin` 的 sandbox iframe。v2 Workbench 面板可经一次性 `MessagePort` 调用最小结构化桥，读取当前标签授权的文本产物、调用本插件声明工具、使用原生 PDF 选择器或请求证据跳转；仍不开放任意文件、网络、Node、凭据或主 React 对象。准确方法列表见 [Plugin API v2 契约](plugin-sdk-v2-workbench.md)。
+`uiPanels` contribution 由独立面板宿主加载。Runtime 校验入口的 realpath 必须位于插件目录内，签发 60 秒一次性票据并注入严格 CSP；Renderer 将其放入不带 `allow-same-origin` 的 sandbox iframe。面板只能经一次性、令牌绑定的 `MessagePort` 调用 `context.read`、`tool.execute` 和 `evidence.reveal`。写工具由宿主逐次确认，后端再次校验工具声明、插件/模板/实例/标签归属和证据目标；不开放任意文件、网络、Node、凭据或主 React 对象。准确契约见 [Plugin API 契约](PLUGIN_API_CONTRACT.md)。
 
 ## 8. 分发与卸载
 

@@ -128,6 +128,10 @@ export interface ModelMessage {
   toolCallId?: Id;
   toolCalls?: ToolCall[];
   reasoningContent?: string;
+  /** File-backed chat inputs are persisted as hash-verified references. Runtime
+   * materializes supported image bytes only for the provider request so event
+   * history does not duplicate large base64 payloads. */
+  attachmentRefs?: ChatAttachmentRef[];
 }
 
 export interface JsonSchema {
@@ -395,7 +399,78 @@ export interface ContextPlan {
   lastModelRun?: ModelRunMetrics;
 }
 
-export type PermissionMode = 'read_only' | 'ask' | 'trusted';
+export type PermissionMode = 'auto' | 'trusted' | 'ask' | 'read_only';
+
+export interface ChatSubmissionInput {
+  text: string;
+  model?: string;
+  thinking?: 'enabled' | 'disabled';
+  reasoningEffort?: ReasoningEffort;
+  permissionMode?: PermissionMode;
+  interfaceLocale?: string;
+  skillIds?: string[];
+  attachments?: ChatAttachmentRef[];
+  researchObjectIds?: string[];
+  mentionedAgentIds?: string[];
+  quotedNodeIds?: string[];
+}
+
+export interface ConversationStartInput {
+  title?: string;
+  leadAgentId?: string;
+  memberAgentIds?: string[];
+  temporary?: boolean;
+  message: ChatSubmissionInput;
+}
+
+export interface ConversationStartResult {
+  session: SessionSummary;
+  turnId: string;
+}
+
+export type ConversationProjectTarget =
+  | { kind: 'detached' }
+  | { kind: 'project'; rootPath: string; name: string; additionalRoots?: string[] };
+
+/** A locally known conversation scope used to keep the sidebar stable across Runtime switches. */
+export interface ConversationSourceDescriptor {
+  kind: 'detached' | 'project';
+  projectId: Id;
+  rootPath: string;
+  name: string;
+  /** Additional user-approved folders that belong to the same project. */
+  additionalRoots?: string[];
+}
+
+export interface ConversationActivateInput {
+  sessionId: Id;
+  projectId: Id;
+  /** False switches only the owning Runtime, for actions such as archive/unarchive. */
+  activate?: boolean;
+}
+
+export interface RuntimeConnectionDescriptor {
+  baseUrl: string;
+  token: string;
+  projectRoot: string;
+  projectFolderSelected: boolean;
+}
+
+/** The connection and already-materialized state returned by a desktop Runtime switch. */
+export interface DesktopConversationActivateResult {
+  connection: RuntimeConnectionDescriptor;
+  snapshot: BootstrapSnapshot;
+}
+
+export interface DesktopConversationStartInput extends ConversationStartInput {
+  target: ConversationProjectTarget;
+}
+
+export interface DesktopConversationStartResult extends ConversationStartResult {
+  connection: RuntimeConnectionDescriptor;
+  snapshot: BootstrapSnapshot;
+}
+export type WorkspaceAccessMode = Exclude<PermissionMode, 'auto'>;
 export type PermissionRule = 'allow' | 'ask' | 'deny';
 export type SecurityPermissionCategory =
   | 'projectRead'
@@ -813,7 +888,7 @@ export interface MarkdownAppearance {
 
 /** Device-local rendering preferences. These are never part of model context. */
 export interface InterfacePreferences {
-  schemaVersion: 2;
+  schemaVersion: 6;
   theme: InterfaceThemeId;
   semanticPaletteOverrides: SemanticPaletteOverrides;
   readingFont: ReadingFont;
@@ -853,6 +928,9 @@ const CONTENT_WIDTHS: readonly ContentWidth[] = [640, 720, 800, 'unbounded'];
 const READING_FONTS: readonly ReadingFont[] = ['serif', 'sans'];
 const EDITOR_FONTS: readonly EditorFont[] = ['follow-reading', 'serif', 'sans', 'monospace'];
 const READING_DELTAS: readonly InterfacePreferences['readingSizeDelta'][] = [-2, -1, 0, 1, 2];
+export const READING_BODY_BASE_SIZE = 11.5;
+export const MARKDOWN_BODY_SIZE_MIN = 10;
+export const MARKDOWN_BODY_SIZE_MAX = 20;
 
 export function systemTimeZone(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
@@ -869,10 +947,10 @@ export function isValidTimeZone(value: unknown): value is string {
 
 export function defaultInterfacePreferences(timeZone = systemTimeZone()): InterfacePreferences {
   return {
-    schemaVersion: 2,
+    schemaVersion: 6,
     theme: 'warm-paper',
     semanticPaletteOverrides: {},
-    readingFont: 'serif',
+    readingFont: 'sans',
     readingSizeDelta: 0,
     chatWidth: 800,
     paperTexture: true,
@@ -881,11 +959,11 @@ export function defaultInterfacePreferences(timeZone = systemTimeZone()): Interf
     singleLineSessions: false,
     markdown: {
       font: 'follow-reading',
-      bodySize: 16,
+      bodySize: 12,
       contentWidth: 800,
-      heading1Size: 28,
-      heading2Size: 21,
-      heading3Size: 18,
+      heading1Size: 21,
+      heading2Size: 17,
+      heading3Size: 14,
       lineHeight: 1.5,
       contentPadding: 24,
     },
@@ -928,16 +1006,31 @@ export function normalizeInterfacePreferences(value: unknown, timeZone = systemT
   const defaults = defaultInterfacePreferences(timeZone);
   const input = recordValue(value);
   const markdown = recordValue(input.markdown);
+  const sourceSchemaVersion = typeof input.schemaVersion === 'number' && Number.isFinite(input.schemaVersion) ? input.schemaVersion : 0;
   const theme = INTERFACE_THEME_IDS.includes(input.theme as InterfaceThemeId) ? input.theme as InterfaceThemeId : defaults.theme;
-  const readingFont = READING_FONTS.includes(input.readingFont as ReadingFont) ? input.readingFont as ReadingFont : defaults.readingFont;
+  const readingFont = sourceSchemaVersion >= 3 && READING_FONTS.includes(input.readingFont as ReadingFont)
+    ? input.readingFont as ReadingFont
+    : defaults.readingFont;
   const readingSizeDelta = READING_DELTAS.includes(input.readingSizeDelta as InterfacePreferences['readingSizeDelta'])
     ? input.readingSizeDelta as InterfacePreferences['readingSizeDelta']
     : defaults.readingSizeDelta;
   const chatWidth = CONTENT_WIDTHS.includes(input.chatWidth as ContentWidth) ? input.chatWidth as ContentWidth : defaults.chatWidth;
   const editorFont = EDITOR_FONTS.includes(markdown.font as EditorFont) ? markdown.font as EditorFont : defaults.markdown.font;
   const editorWidth = CONTENT_WIDTHS.includes(markdown.contentWidth as ContentWidth) ? markdown.contentWidth as ContentWidth : defaults.markdown.contentWidth;
+  const markdownBodySize = typeof markdown.bodySize !== 'number' || sourceSchemaVersion >= 5 || sourceSchemaVersion === 0
+    ? markdown.bodySize
+    : sourceSchemaVersion === 4 ? markdown.bodySize + 0.5 : markdown.bodySize - 4;
+  const heading1Size = sourceSchemaVersion > 0 && sourceSchemaVersion < 6 && typeof markdown.heading1Size === 'number'
+    ? markdown.heading1Size - (sourceSchemaVersion === 5 ? 1 : 7)
+    : markdown.heading1Size;
+  const heading2Size = sourceSchemaVersion > 0 && sourceSchemaVersion < 6 && typeof markdown.heading2Size === 'number'
+    ? markdown.heading2Size - (sourceSchemaVersion === 5 ? 1 : 4)
+    : markdown.heading2Size;
+  const heading3Size = sourceSchemaVersion > 0 && sourceSchemaVersion < 6 && typeof markdown.heading3Size === 'number'
+    ? markdown.heading3Size - (sourceSchemaVersion === 5 ? 1 : 4)
+    : markdown.heading3Size;
   return {
-    schemaVersion: 2,
+    schemaVersion: 6,
     theme,
     semanticPaletteOverrides: normalizeSemanticPaletteOverrides(input.semanticPaletteOverrides),
     readingFont,
@@ -949,11 +1042,11 @@ export function normalizeInterfacePreferences(value: unknown, timeZone = systemT
     singleLineSessions: typeof input.singleLineSessions === 'boolean' ? input.singleLineSessions : defaults.singleLineSessions,
     markdown: {
       font: editorFont,
-      bodySize: boundedNumber(markdown.bodySize, defaults.markdown.bodySize, 12, 24),
+      bodySize: boundedNumber(markdownBodySize, defaults.markdown.bodySize, MARKDOWN_BODY_SIZE_MIN, MARKDOWN_BODY_SIZE_MAX, false),
       contentWidth: editorWidth,
-      heading1Size: boundedNumber(markdown.heading1Size, defaults.markdown.heading1Size, 20, 48),
-      heading2Size: boundedNumber(markdown.heading2Size, defaults.markdown.heading2Size, 18, 40),
-      heading3Size: boundedNumber(markdown.heading3Size, defaults.markdown.heading3Size, 14, 32),
+      heading1Size: boundedNumber(heading1Size, defaults.markdown.heading1Size, 16, 36),
+      heading2Size: boundedNumber(heading2Size, defaults.markdown.heading2Size, 14, 30),
+      heading3Size: boundedNumber(heading3Size, defaults.markdown.heading3Size, 12, 24),
       lineHeight: boundedNumber(markdown.lineHeight, defaults.markdown.lineHeight, 1.2, 2.2, false),
       contentPadding: boundedNumber(markdown.contentPadding, defaults.markdown.contentPadding, 0, 64),
     },
@@ -966,7 +1059,7 @@ export function mergeInterfacePreferences(current: InterfacePreferences, patch: 
   return normalizeInterfacePreferences({
     ...current,
     ...patch,
-    schemaVersion: 2,
+    schemaVersion: 6,
     markdown: { ...current.markdown, ...patch.markdown },
   }, current.timeZone);
 }
@@ -993,6 +1086,19 @@ export interface PrimaryAgentProfileUpdate {
   instructions?: string;
 }
 
+export interface UserProfile {
+  name: string;
+  profile: string;
+  avatar?: string;
+  updatedAt?: string;
+}
+
+export interface UserProfileUpdate {
+  name: string;
+  profile: string;
+  avatar?: string | null;
+}
+
 export interface SessionSummary {
   id: Id;
   projectId: Id;
@@ -1000,6 +1106,10 @@ export interface SessionSummary {
   status: 'idle' | 'running' | 'interrupted' | 'archived';
   updatedAt: string;
   model: string;
+  /** Lead Agent assigned to this conversation. Older persisted sessions may not contain it. */
+  leadAgentId?: Id;
+  /** Temporary chats live only in the current Runtime process and never enter history. */
+  temporary?: boolean;
 }
 
 export interface TimelineNode {
@@ -1026,7 +1136,7 @@ export interface WorkspaceRootSummary {
   name: string;
   displayPath: string;
   kind: WorkspaceRootKind;
-  access: PermissionMode;
+  access: WorkspaceAccessMode;
   status: WorkspaceRootStatus;
 }
 
@@ -1081,7 +1191,7 @@ export interface WorkspacePreview {
   name: string;
   mediaType?: string;
   size: number;
-  kind: 'text' | 'image' | 'metadata';
+  kind: 'text' | 'image' | 'pdf' | 'word' | 'metadata';
   content?: string;
   dataUrl?: string;
   truncated?: boolean;
@@ -1549,9 +1659,12 @@ export interface BrowserSessionSummary {
   profileId: Id;
   instanceId: Id;
   paneId: Id;
+  surface?: 'worktable' | 'workspace_preview';
   url: string;
   title: string;
   status: 'idle' | 'loading' | 'ready' | 'crashed' | 'closed';
+  canGoBack?: boolean;
+  canGoForward?: boolean;
   authorizedDomains: string[];
   observationRevision: number;
   createdAt: string;
@@ -1616,8 +1729,11 @@ export interface BootstrapSnapshot {
   project: ProjectSummary;
   /** Compatibility projection for pre-v3 onboarding consumers. */
   primaryAgent: PrimaryAgentProfile;
+  userProfile?: UserProfile;
   settings: HarnessSettings;
   sessions: SessionSummary[];
+  /** All persisted conversations in the local event store, across project scopes. */
+  sessionCatalog?: SessionSummary[];
   activeSessionId: Id;
   timeline: TimelineNode[];
   workspace: SessionWorkspace;
@@ -1665,6 +1781,7 @@ export interface BootstrapSnapshot {
 export type ServerPushMessage =
   | { type: 'snapshot'; snapshot: BootstrapSnapshot }
   | { type: 'profile.changed'; profile: PrimaryAgentProfile }
+  | { type: 'user-profile.changed'; profile: UserProfile }
   | { type: 'sessions.changed'; sessions: SessionSummary[]; activeSessionId: Id }
   | { type: 'timeline.append'; node: TimelineNode }
   | { type: 'timeline.patch'; id: Id; patch: Partial<TimelineNode> }
