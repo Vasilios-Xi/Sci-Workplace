@@ -459,7 +459,7 @@ export function WorkspacePreviewDeck(props: WorkspacePreviewDeckProps) {
     <div className="workspace-preview-content">
       {active.kind === 'file' ? <FilePreview preview={active.preview} onOpenSystem={() => props.onOpenSystem(active.preview)}/>
         : active.kind === 'terminal' ? <TerminalPreview terminalId={active.terminalId} onAction={props.onTerminalAction}/>
-          : <BrowserPreview session={browserSession} initialUrl={active.initialUrl} active onNavigate={props.onNavigateBrowser} onHistory={props.onBrowserHistory} onSetBounds={props.onSetBrowserBounds}/>} 
+          : <BrowserPreview session={browserSession} initialUrl={active.initialUrl} active onNavigate={props.onNavigateBrowser} onHistory={props.onBrowserHistory} onSetBounds={props.onSetBrowserBounds}/>}
     </div>
   </section>;
 }
