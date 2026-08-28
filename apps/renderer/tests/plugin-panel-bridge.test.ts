@@ -8,7 +8,7 @@ describe('plugin panel host bridge', () => {
     const channel = new MessageChannel();
     connectPluginPanel(target, 'panel-token', channel.port2);
     expect(calls).toEqual([[
-      { type: 'openlab.plugin-panel.connect', token: 'panel-token', methods: ['context.read', 'tool.execute', 'evidence.reveal'] },
+      { type: 'openlab.plugin-panel.connect', token: 'panel-token', methods: ['context.read', 'tool.execute', 'evidence.reveal', 'resource.open'] },
       '*',
       [channel.port2],
     ]]);

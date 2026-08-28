@@ -65,11 +65,12 @@ interface RuntimeErrorMessage {
 
 const require = createRequire(import.meta.url);
 app.setName('Sci Workplace');
-// Keep the legacy data directory so the product rename does not strand existing
-// conversations, credentials, preferences, or project bindings.
+// Harness v1 intentionally starts from a new application-managed state root.
+// scripts/reset-app-state.ps1 backs up this managed root before an explicit
+// reset; user project directories are never part of this path.
 const appDataRoot = process.env.OPENLAB_TEST_USER_DATA_ROOT
   ? resolve(process.env.OPENLAB_TEST_USER_DATA_ROOT)
-  : join(app.getPath('appData'), 'OpenLab');
+  : join(app.getPath('appData'), 'SciWorkplace');
 app.setPath('userData', appDataRoot);
 
 let mainWindow: BrowserWindow | undefined;
@@ -292,11 +293,38 @@ async function runtimeRequestAll(path: string, init?: RequestInit): Promise<void
 
 async function stopRuntimeChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  try { child.send?.({ type: 'shutdown' }); }
-  catch { child.kill(); }
   await new Promise<void>((resolvePromise) => {
-    const timer = setTimeout(() => { child.kill(); resolvePromise(); }, 10_000);
-    child.once('exit', () => { clearTimeout(timer); resolvePromise(); });
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    const complete = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', complete);
+      resolvePromise();
+    };
+    const kill = () => {
+      try {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      } catch { /* The process may have exited between the liveness check and kill. */ }
+    };
+    timer = setTimeout(() => { kill(); complete(); }, 10_000);
+    child.once('exit', complete);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      complete();
+      return;
+    }
+    if (!child.connected || !child.send) {
+      kill();
+      return;
+    }
+    try {
+      child.send({ type: 'shutdown' }, (error) => {
+        if (error) kill();
+      });
+    } catch {
+      kill();
+    }
   });
 }
 
@@ -337,29 +365,29 @@ function spawnRuntime(projectRoot: string, projectFolderSelectedOverride?: boole
     child.stderr?.on('data', (chunk: Buffer) => {
       if (!app.isPackaged) process.stderr.write(chunk);
     });
-    const timer = setTimeout(() => {
+    let timer: NodeJS.Timeout | undefined;
+    const failStartup = (error: Error) => {
       if (startupSettled) return;
       startupSettled = true;
-      child.kill();
-      reject(new Error(copy.runtimeStartTimeout));
-    }, 90_000);
+      if (timer) clearTimeout(timer);
+      try { child.kill(); } catch { /* The child may already have exited. */ }
+      reject(error);
+    };
+    timer = setTimeout(() => failStartup(new Error(copy.runtimeStartTimeout)), 90_000);
+    child.once('error', (error) => failStartup(error));
     child.on('message', (message: RuntimeReadyMessage | RuntimeErrorMessage) => {
       if (message.type === 'error') {
-        if (startupSettled) return;
-        startupSettled = true;
-        clearTimeout(timer);
-        child.kill();
-        reject(new Error(message.message));
+        failStartup(new Error(message.message));
         return;
       }
       if (message.type === 'ready' && !startupSettled) {
         startupSettled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         resolvePromise({ baseUrl: message.url, token: message.authToken, projectRoot, projectFolderSelected: projectFolderSelectedOverride ?? selectedProjectRoot() === resolve(projectRoot) });
       }
     });
     child.once('exit', (code) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       runtimeChildren.delete(child);
       removeRuntimeSlot(child);
       if (!startupSettled) {
@@ -373,17 +401,24 @@ function spawnRuntime(projectRoot: string, projectFolderSelectedOverride?: boole
         if (code && !mainWindow?.isDestroyed()) void dialog.showMessageBox({ type: 'error', title: copy.runtimeStoppedTitle, message: copy.runtimeStoppedMessage, detail: copy.exitCode(code) });
       }
     });
-    child.send({
+    const startMessage = {
       type: 'start',
       config: {
         host: '127.0.0.1', port: 0, authToken, projectRoot,
         ...(additionalProjectRoots.length ? { projectRoots: additionalProjectRoots } : {}),
-        home: app.getPath('userData'), demo: false,
+        home: app.getPath('userData'), demo: false, deferInitialSession: true,
         credentials: readMcpCredentials(),
         ...(browserBrokerConnection ? { browserBroker: browserBrokerConnection } : {}),
         ...(readDeepSeekKey() ? { deepSeekApiKey: readDeepSeekKey() } : {}),
       },
-    });
+    };
+    try {
+      child.send(startMessage, (error) => {
+        if (error) failStartup(error);
+      });
+    } catch (error) {
+      failStartup(error instanceof Error ? error : new Error(String(error)));
+    }
   });
   return { child, ready };
 }
@@ -972,6 +1007,22 @@ function registerIpc(): void {
     });
     return result.canceled ? undefined : result.filePaths[0];
   });
+  ipcMain.handle('plugin-catalog:choose-index', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: copy.choosePluginCatalogIndex,
+      properties: ['openFile'],
+      filters: [{ name: copy.signedCatalog, extensions: ['json'] }],
+    });
+    return result.canceled ? undefined : result.filePaths[0];
+  });
+  ipcMain.handle('plugin-catalog:choose-package', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: copy.chooseCuratedPluginPackage,
+      properties: ['openFile'],
+      filters: [{ name: copy.zipArchive, extensions: ['zip'] }],
+    });
+    return result.canceled ? undefined : result.filePaths[0];
+  });
   ipcMain.handle('toolchain:choose', async () => {
     const choice = await dialog.showMessageBox(mainWindow!, {
       type: 'question',
@@ -1324,7 +1375,7 @@ app.whenReady().then(async () => {
     }
     const pluginPanel = details.resourceType === 'subFrame' && /^http:\/\/127\.0\.0\.1:\d+\/plugin-panels\//u.test(details.url);
     headers['Content-Security-Policy'] = [pluginPanel
-      ? "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*"
+      ? "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; frame-src http://127.0.0.1:*; object-src http://127.0.0.1:*; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*"
       : [
         "default-src 'self'",
         "script-src 'self'",

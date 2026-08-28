@@ -8,11 +8,12 @@ import type { Annotation, JobRecord, ServerPushMessage } from '@openlab/protocol
 import { SqliteEventStore } from '../src/events/event-store.js';
 import { OpenLabRuntime } from '../src/runtime.js';
 import { startRuntimeServer } from '../src/server/runtime-server.js';
-import { CORE_WORKTABLE_TEMPLATES, MAX_WORKTABLE_TABS, WorktableStore } from '../src/worktable/worktable-store.js';
+import { CORE_WORKBENCH_BLUEPRINTS, workbenchBlueprintToTemplate } from '../src/workbench/workbench-service.js';
+import { MAX_WORKTABLE_TABS, WorktableStore } from '../src/worktable/worktable-store.js';
 
 const temporaryDirectories: string[] = [];
 function temporaryDirectory(): string {
-  const directory = mkdtempSync(join(tmpdir(), 'openlab-worktable-v5-'));
+  const directory = mkdtempSync(join(tmpdir(), 'sci-workbench-v1-'));
   temporaryDirectories.push(directory);
   return directory;
 }
@@ -23,13 +24,13 @@ afterEach(() => {
 const actor = { id: 'local-user', kind: 'user', label: 'Test User' } as const;
 const jsonHeaders = { Authorization: 'Bearer worktable-test', 'Content-Type': 'application/json' };
 
-describe('protocol-v5 top-level worktable runtime', () => {
+describe('Workbench v1 persistence substrate', () => {
   it('event-sources instances, layouts, tabs, context metadata, and archive state', () => {
     const root = temporaryDirectory();
     const database = join(root, 'events.sqlite');
     const events = new SqliteEventStore(database);
     const store = new WorktableStore({ projectId: 'project-v5', events });
-    const instance = store.create(CORE_WORKTABLE_TEMPLATES[0]!, { title: '审阅工作台', boundSessionId: 'session-1' }, actor);
+    const instance = store.create(workbenchBlueprintToTemplate(CORE_WORKBENCH_BLUEPRINTS[0]!), { title: '审阅工作台', boundSessionId: 'session-1' }, actor);
     expect(instance.panes).toHaveLength(2);
     expect(instance).toMatchObject({ revision: 1, inputs: {}, templateVersion: '1.0.0' });
     expect(store.snapshot().activeInstanceId).toBe(instance.id);
@@ -125,13 +126,13 @@ describe('protocol-v5 top-level worktable runtime', () => {
     recoveredEvents.close();
   });
 
-  it('validates versioned template inputs and migrates legacy instance projections', () => {
+  it('validates versioned blueprint inputs and deliberately ignores legacy projections', () => {
     const root = temporaryDirectory();
     const database = join(root, 'events.sqlite');
     const events = new SqliteEventStore(database);
     const store = new WorktableStore({ projectId: 'project-v5', events });
     const template = {
-      ...structuredClone(CORE_WORKTABLE_TEMPLATES[0]!),
+      ...workbenchBlueprintToTemplate(structuredClone(CORE_WORKBENCH_BLUEPRINTS[0]!)),
       id: 'fixture.reader',
       version: '2.1.0',
       inputSchema: {
@@ -163,12 +164,11 @@ describe('protocol-v5 top-level worktable runtime', () => {
       provenanceRefs: [created.id],
       payload: { state: { instances: [legacy], activeInstanceId: created.id }, instanceId: created.id },
     });
-    const migrated = new WorktableStore({ projectId: 'legacy-project', events: legacyEvents }).snapshot().instances[0]!;
-    expect(migrated).toMatchObject({ revision: 1, inputs: {}, templateVersion: '0.0.0-legacy', status: 'archived', archivedAt: timestamp });
+    expect(new WorktableStore({ projectId: 'legacy-project', events: legacyEvents }).snapshot().instances).toEqual([]);
     legacyEvents.close();
   });
 
-  it('serves the renderer REST contract, projects legacy Workbench opens, and rejects browser secrets', async () => {
+  it('serves the Workbench REST contract without legacy projection and rejects browser secrets', async () => {
     const root = temporaryDirectory();
     const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'worktable-test', projectRoot: root, home: join(root, '.runtime'), demo: true });
     await runtime.initialize();
@@ -177,12 +177,18 @@ describe('protocol-v5 top-level worktable runtime', () => {
     const server = await startRuntimeServer(runtime, { host: '127.0.0.1', port: 0, authToken: 'worktable-test' });
     try {
       const createdResponse = await fetch(`${server.url}/api/worktable/instances`, {
-        method: 'POST', headers: jsonHeaders, body: JSON.stringify({ templateId: 'openlab.research', title: 'HTTP 工作台' }),
+        method: 'POST', headers: jsonHeaders, body: JSON.stringify({ templateId: 'sci.core:research', title: 'HTTP 工作台' }),
       });
       expect(createdResponse.status).toBe(201);
       const created = await createdResponse.json() as { instance: ReturnType<OpenLabRuntime['createWorktable']> };
       const instance = created.instance;
       const paneId = instance.panes[1]!.id;
+
+      const directLayout = await fetch(`${server.url}/api/worktable/instances/${instance.id}/layout`, {
+        method: 'POST', headers: jsonHeaders, body: JSON.stringify({ layout: instance.layout, panes: instance.panes, activePaneId: instance.activePaneId }),
+      });
+      expect(directLayout.status).toBe(400);
+      expect(await directLayout.text()).toMatch(/LayoutProposalV1/u);
 
       const mountedResponse = await fetch(`${server.url}/api/worktable/instances/${instance.id}/panes/${paneId}/tabs`, {
         method: 'POST', headers: jsonHeaders, body: JSON.stringify({ title: '浏览器', content: { kind: 'builtin', type: 'browser' } }),
@@ -234,9 +240,10 @@ describe('protocol-v5 top-level worktable runtime', () => {
       expect(secretResponse.status).toBe(400);
       expect(await secretResponse.text()).toMatch(/敏感字段/u);
 
-      runtime.openWorkbench({ title: '兼容审阅台', workbenchId: 'openlab.figure-review' });
-      expect(runtime.worktables.snapshot().instances.some((candidate) => candidate.id.startsWith('legacy-workbench:'))).toBe(true);
-      expect(pushes.some((message) => message.type === 'worktable.changed')).toBe(true);
+      const workbenchInstanceCount = runtime.worktables.snapshot().instances.length;
+      runtime.openWorkbench({ title: '旧式审阅标签', workbenchId: 'openlab.figure-review' });
+      expect(runtime.worktables.snapshot().instances).toHaveLength(workbenchInstanceCount);
+      expect(pushes.some((message) => message.type === 'workbench.changed')).toBe(true);
 
       const closeResponse = await fetch(`${server.url}/api/worktable/instances/${instance.id}/panes/${paneId}/tabs/${mounted.id}`, { method: 'DELETE', headers: jsonHeaders });
       expect(closeResponse.status).toBe(200);

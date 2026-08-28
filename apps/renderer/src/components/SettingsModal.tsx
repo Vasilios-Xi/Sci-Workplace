@@ -98,7 +98,7 @@ function SecuritySettings({ settings, onUpdate }: {
     settings: HarnessSettings;
     onUpdate(patch: Partial<HarnessSettings>): Promise<void>;
 }) {
-    const [saving, setSaving] = useState<SecurityPermissionCategory>();
+    const [saving, setSaving] = useState<SecurityPermissionCategory | 'developerMode'>();
     const policy = settings.securityPolicy;
     const updateRule = async (category: SecurityPermissionCategory, rule: PermissionRule) => {
         if (rule === policy[category])
@@ -125,6 +125,18 @@ function SecuritySettings({ settings, onUpdate }: {
             setSaving(undefined);
         }
     };
+    const toggleDeveloperMode = async () => {
+        const enabled = !settings.developerMode;
+        if (enabled && !await confirmInApp(hanaZhCN.securityPolicy.developerMode.warning, { title: hanaZhCN.securityPolicy.developerMode.confirmTitle, confirmLabel: hanaZhCN.securityPolicy.developerMode.confirm, tone: 'danger' }))
+            return;
+        setSaving('developerMode');
+        try {
+            await onUpdate({ developerMode: enabled });
+        }
+        finally {
+            setSaving(undefined);
+        }
+    };
     return <>
       <div className="settings-heading"><span className="settings-heading__icon red"><ShieldCheck size={20}/></span><div><h2>{hanaZhCN.securityPolicy.title}</h2><p>{hanaZhCN.securityPolicy.subtitle}</p></div></div>
       <div className="security-policy-note"><ShieldCheck size={15}/><div><strong>{hanaZhCN.securityPolicy.noteTitle}</strong><span>{hanaZhCN.securityPolicy.note}</span></div></div>
@@ -144,6 +156,7 @@ function SecuritySettings({ settings, onUpdate }: {
           </select>
         </SettingRow>)}
         <SettingRow title={hanaZhCN.securityPolicy.isolationTitle} description={hanaZhCN.securityPolicy.isolationDescription}><span className="setting-value">{hanaZhCN.securityPolicy.isolationValue}</span></SettingRow>
+        <SettingRow title={hanaZhCN.securityPolicy.developerMode.title} description={hanaZhCN.securityPolicy.developerMode.description}><button data-testid="plugin-developer-mode" className={`button ${settings.developerMode ? 'danger' : 'secondary'}`} disabled={saving !== undefined} onClick={() => void toggleDeveloperMode()}>{settings.developerMode ? hanaZhCN.securityPolicy.developerMode.disable : hanaZhCN.securityPolicy.developerMode.enable}</button></SettingRow>
       </section>
       <div className="security-policy-footer"><span>{saving ? hanaZhCN.securityPolicy.saving : hanaZhCN.securityPolicy.saved}</span><button data-testid="security-policy-reset" className="button secondary" disabled={saving !== undefined} onClick={() => void reset()}>{hanaZhCN.securityPolicy.reset}</button></div>
     </>;

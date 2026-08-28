@@ -8,8 +8,6 @@ import type {
   JsonSchema,
   JsonValue,
   JobRecord,
-  WorkbenchContribution,
-  WorkbenchTab,
   WorktableContent,
   WorktableContextSnapshot,
   WorktableInstance,
@@ -26,7 +24,6 @@ export const MAX_WORKTABLE_PANES = 6;
 export const MAX_WORKTABLE_TABS = 20;
 
 const DEFAULT_PANE_ID = 'main';
-const LEGACY_TEMPLATE_VERSION = '0.0.0-legacy';
 const EMPTY_INPUT_SCHEMA: JsonSchema = { type: 'object', additionalProperties: false };
 const TEMPLATE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 
@@ -75,40 +72,6 @@ export const CORE_WORKTABLE_TEMPLATES: WorktableTemplateContribution[] = [
     ],
   },
 ];
-
-function legacyContent(contribution: WorkbenchContribution, view: WorkbenchContribution['views'][number]): WorktableContent {
-  if (view.kind === 'custom' && contribution.pluginId && view.panelId) {
-    return { kind: 'plugin-panel', pluginId: contribution.pluginId, panelId: view.panelId };
-  }
-  if (view.kind === 'jobs') return { kind: 'builtin', type: 'tasks' };
-  return { kind: 'builtin', type: 'explorer' };
-}
-
-/** Compatibility projection for protocol-v4 Workbench contributions. */
-export function legacyWorkbenchTemplate(contribution: WorkbenchContribution): WorktableTemplateContribution {
-  const paneId = `legacy-pane:${contribution.id}`;
-  const tabs = contribution.views.slice(0, MAX_WORKTABLE_TABS).map((view) => ({
-    id: `legacy-view:${contribution.id}:${view.id}`,
-    title: view.title,
-    content: legacyContent(contribution, view),
-    openedAt: 'template',
-  } satisfies WorktableTab));
-  if (tabs.length === 0) {
-    tabs.push({ id: `legacy-view:${contribution.id}:files`, title: '文件', content: { kind: 'builtin', type: 'explorer' }, openedAt: 'template' });
-  }
-  return {
-    id: `legacy:${contribution.id}`,
-    version: LEGACY_TEMPLATE_VERSION,
-    title: contribution.title,
-    description: '由旧式 Workbench 贡献自动映射。',
-    ...(contribution.pluginId ? { pluginId: contribution.pluginId } : {}),
-    kind: 'research',
-    inputSchema: EMPTY_INPUT_SCHEMA,
-    layout: { kind: 'pane', paneId },
-    panes: [{ id: paneId, title: contribution.title, tabs, activeTabId: tabs[0]!.id }],
-    commands: [...contribution.commands],
-  };
-}
 
 function collectLayoutPaneIds(node: WorktableSplitNode, output: string[] = []): string[] {
   if (node.kind === 'pane') {
@@ -189,21 +152,19 @@ function optionalId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
-function normalizeReplayedInstance(instance: WorktableInstance, fallbackRevision: number, eventTimestamp: string): WorktableInstance {
+function currentReplayedInstance(instance: WorktableInstance): WorktableInstance | undefined {
+  if (!validRevision(instance.revision) || !isRecord(instance.inputs) || !optionalId(instance.templateId)
+    || !instance.templateVersion || !TEMPLATE_VERSION_PATTERN.test(instance.templateVersion)) return undefined;
   const normalized = structuredClone(instance);
-  normalized.revision = validRevision(instance.revision) ? instance.revision : Math.max(1, fallbackRevision);
-  normalized.inputs = isRecord(instance.inputs) ? structuredClone(instance.inputs) as Record<string, JsonValue> : {};
-  if (instance.templateId) normalized.templateVersion = optionalId(instance.templateVersion) ?? LEGACY_TEMPLATE_VERSION;
-  else delete normalized.templateVersion;
-
   for (const key of ['activeRunId', 'artifactId', 'artifactRevisionId'] as const) {
     const value = optionalId(instance[key]);
     if (value) normalized[key] = value;
     else delete normalized[key];
   }
   if (!normalized.artifactId) delete normalized.artifactRevisionId;
-  if (normalized.status === 'archived') normalized.archivedAt = optionalId(instance.archivedAt) ?? optionalId(instance.updatedAt) ?? eventTimestamp;
-  else delete normalized.archivedAt;
+  if (normalized.status === 'archived') {
+    if (!optionalId(instance.archivedAt)) return undefined;
+  } else delete normalized.archivedAt;
   return normalized;
 }
 
@@ -408,35 +369,6 @@ export class WorktableStore {
     return this.patch(instanceId, { panes }, actor);
   }
 
-  syncLegacy(tab: WorkbenchTab, contribution: WorkbenchContribution, actor: EventActor): WorktableInstance {
-    const id = `legacy-workbench:${tab.id}`;
-    let instance = this.#state.instances.find((candidate) => candidate.id === id);
-    if (!instance) {
-      instance = this.create(legacyWorkbenchTemplate(contribution), { id, title: tab.title }, actor);
-    }
-    if (instance.status === 'archived') {
-      this.activate(instance.id, actor);
-      return instance;
-    }
-    const pane = instance.panes[0]!;
-    const activeIndex = Math.max(0, contribution.views.findIndex((view) => view.id === tab.activeViewId));
-    const panes = instance.panes.map((candidate, paneIndex) => {
-      if (paneIndex !== 0) return candidate;
-      const tabs = candidate.tabs.map((candidateTab, index) => {
-        let content = candidateTab.content;
-        const view = contribution.views[index];
-        if (view?.kind === 'custom' && contribution.pluginId && view.panelId) content = { kind: 'plugin-panel', pluginId: contribution.pluginId, panelId: view.panelId };
-        else if (tab.document) content = { kind: 'document', target: structuredClone(tab.document) };
-        else if (tab.artifactId) content = { kind: 'artifact', artifactId: tab.artifactId, ...(tab.artifactRevisionId ? { revisionId: tab.artifactRevisionId } : {}), ...(view?.role ? { role: view.role } : {}) };
-        return { ...candidateTab, content };
-      });
-      return { ...candidate, tabs, activeTabId: (tabs[activeIndex] ?? tabs[0])!.id };
-    });
-    instance = this.patch(instance.id, { panes, activePaneId: pane.id, status: instance.status }, actor);
-    this.activate(instance.id, actor);
-    return instance;
-  }
-
   context(instanceId: string, jobs: JobRecord[], annotations: Annotation[]): WorktableContextSnapshot {
     const instance = this.requireInstance(instanceId);
     const documentHashes = new Set(instance.panes.flatMap((pane) => pane.tabs).flatMap((tab) => tab.content.kind === 'document' ? [tab.content.target.sha256] : []));
@@ -511,11 +443,9 @@ export class WorktableStore {
       if (!event.kind.startsWith('worktable.')) continue;
       const projected = statePayload(event.payload);
       if (!projected) continue;
-      const instances = projected.state.instances.map((instance) => {
-        const fallbackRevision = projected.instanceId === instance.id
-          ? (validRevision(projected.revision) ? projected.revision : (this.#revisions.get(instance.id) ?? 0) + 1)
-          : this.#revisions.get(instance.id) ?? 1;
-        return normalizeReplayedInstance(instance, fallbackRevision, event.timestamp);
+      const instances = projected.state.instances.flatMap((instance) => {
+        const current = currentReplayedInstance(instance);
+        return current ? [current] : [];
       });
       const activeInstanceId = projected.state.activeInstanceId && instances.some((instance) => instance.id === projected.state.activeInstanceId)
         ? projected.state.activeInstanceId

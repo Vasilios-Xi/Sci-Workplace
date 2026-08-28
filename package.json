@@ -16,6 +16,8 @@
     "test:e2e": "pnpm build && pnpm test:e2e:built",
     "test:e2e:built": "node scripts/electron-e2e.mjs",
     "test:e2e:packaged": "node scripts/electron-e2e.mjs --packaged",
+    "verify:plugin-catalog": "node scripts/verify-plugin-index.mjs plugin-catalog/index.source.json",
+    "package:win": "pnpm --filter @openlab/desktop package:win",
     "test:deepseek": "pnpm --filter @openlab/runtime test:deepseek",
     "dev": "concurrently -k -n renderer,desktop -c cyan,magenta \"pnpm --filter @openlab/renderer dev\" \"pnpm --filter @openlab/desktop dev\"",
     "start": "pnpm build && pnpm --filter @openlab/desktop start",

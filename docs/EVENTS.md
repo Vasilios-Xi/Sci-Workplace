@@ -11,6 +11,9 @@ interface RuntimeEventEnvelope<TPayload> {
   schemaVersion: number;
   timestamp: string;
   actor: EventActor;
+  deviceId: string;
+  idempotencyKey: string;
+  revision: number;
   agentId?: string;
   traceId: string;
   provenanceRefs: string[];
@@ -18,7 +21,7 @@ interface RuntimeEventEnvelope<TPayload> {
 }
 ```
 
-每个 `streamId` 使用 SQLite `BEGIN IMMEDIATE` 分配严格递增序号。当前 schema migration 版本存入 `schema_migrations` 和 `PRAGMA user_version`。
+每个 `streamId` 使用 SQLite `BEGIN IMMEDIATE` 分配严格递增序号。`(streamId,idempotencyKey)` 唯一；同键同事件返回既有结果，同键不同内容被拒绝。`revision` 表示业务实体版本，`deviceId` 是稳定本机身份，为未来同步/冲突处理保留。当前数据库 schema 为 v5，版本同时存入 `schema_migrations` 与 `PRAGMA user_version`。
 
 主要事件族：
 
@@ -39,6 +42,12 @@ interface RuntimeEventEnvelope<TPayload> {
 | channel/mailbox | `channel.created`, `channel.settings_changed`, `channel.message_sent`, `channel.run_started`, `channel.run_completed`, `channel.paused`, `channel.archived`, `mailbox.message_sent`, `mailbox.message_read` | 可回放私聊/群聊、有限轮执行、顺序通信和结果收敛 |
 | research | `research_object.created`, `research_object.updated`, `research_object.related`, `research_object.recovered`, `research_object.relation_imported` | 科研对象图及项目投影调和 |
 | artifact | `artifact.provenance_recorded`, `artifact.provenance_imported` | 产物输入、文件哈希、模型/工具/插件版本和 trace |
+| workbench | `workbench.instance_created`, `workbench.instance_updated`, `workbench.layout_proposed`, `workbench.layout_decided`, `workbench.artifact_mounted` | Blueprint/实例、主对话、布局 revision、确认与幂等挂载 |
+| scientific kernel | `evidence.anchor_created`, `annotation.v1_created`, `run.recorded`, `review.requested`, `review.decided` | 文档证据、批注、运行与审核请求 |
+| paper reader | `paper-reader.configured`, `paper-reader.updated` | 不可变 PDF/SI 修订、解析检查点、翻译/报告版本与恢复状态 |
+| generated app | `generated-app-blueprint.*`, `generated-app.*` | 提示词蓝图、能力确认、构建、沙箱预览、接受与不可变应用修订 |
+| toolchain | `toolchain.run_*` | 外部程序授权、隔离执行、日志、取消和 Artifact 回收 |
+| plugin catalog | `plugin-catalog.updated`, `plugin-catalog.plugin_revoked` | 签名索引 sequence、可信 key、撤回和活动插件停用 |
 | skills/plugins | `skill.installed`, `plugin.scaffolded`, `plugin.installed`, `plugin.enabled`, `plugin.disabled`, `plugin.settings_changed`, `plugin.reloaded`, `plugin.reload_failed`, `plugin.exported`, `plugin.uninstalled` | 扩展来源、权限、状态、完整性和回滚诊断 |
 | settings/data | `settings.primary_agent_profile_changed`, `settings.provider_changed`, `settings.harness_changed`, `settings.mcp_changed`, `settings.mcp_removed`, `settings.database_backed_up` | 旧主 Agent 兼容投影、Provider、Harness、MCP 和本地数据操作审计 |
 

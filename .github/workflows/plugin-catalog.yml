@@ -1,0 +1,53 @@
+name: Curated Plugin Catalog
+
+on:
+  pull_request:
+    paths:
+      - "plugin-catalog/**"
+      - "scripts/verify-plugin-index.mjs"
+      - "scripts/sign-plugin-index.mjs"
+      - ".github/workflows/plugin-catalog.yml"
+  push:
+    branches: [main]
+    paths:
+      - "plugin-catalog/**"
+      - "scripts/verify-plugin-index.mjs"
+      - "scripts/sign-plugin-index.mjs"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.19.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/verify-plugin-index.mjs plugin-catalog/index.source.json
+      - run: pnpm test -- packages/runtime/tests/plugin-v4-manifest.test.ts packages/runtime/tests/harness-services-v1.test.ts
+
+  sign:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: windows-latest
+    environment: plugin-catalog-signing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - shell: pwsh
+        run: New-Item -ItemType Directory -Path artifacts/catalog -Force | Out-Null
+      - name: Sign canonical catalog
+        env:
+          SCI_WORKPLACE_PLUGIN_CATALOG_PRIVATE_KEY: ${{ secrets.SCI_WORKPLACE_PLUGIN_CATALOG_PRIVATE_KEY }}
+        run: node scripts/sign-plugin-index.mjs plugin-catalog/index.source.json env:SCI_WORKPLACE_PLUGIN_CATALOG_PRIVATE_KEY artifacts/catalog/catalog.signed.json sci-workplace-curated-v1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sci-workplace-curated-catalog
+          path: artifacts/catalog/catalog.signed.json
+          if-no-files-found: error

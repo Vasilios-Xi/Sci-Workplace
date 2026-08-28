@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { ArrowLeft, CircleAlert, FolderOpen, GitFork, Maximize2, Minimize2, PanelRight, RefreshCw, Sparkles, X } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { CircleAlert, FolderOpen, GitFork, Maximize2, Minimize2, PanelRight, RefreshCw, Sparkles, X } from 'lucide-react';
 import type { AppMode, ChatAttachmentRef, ConversationProjectTarget, ConversationSourceDescriptor } from '@openlab/protocol';
 import { Composer } from './components/Composer.js';
 import { AppDialogHost } from './components/AppDialog.js';
@@ -10,15 +10,16 @@ import { PrimaryAgentOnboarding } from './components/PrimaryAgentOnboarding.js';
 import { Sidebar } from './components/Sidebar.js';
 import { Timeline } from './components/Timeline.js';
 import { Titlebar } from './components/Titlebar.js';
+import { WorktableShell } from './components/WorktableShell.js';
 import { clampWorkspaceWidth, loadChatLayoutPreferences, saveChatLayoutPreferences } from './lib/chat-layout.js';
 import type { ChatLayoutPreferencesV1 } from './lib/chat-layout.js';
 import { normalizeDraftAgentBinding } from './lib/draft-agent-binding.js';
-import { conversationDraftReducer } from './lib/conversation-draft.js';
+import { conversationDraftReducer, shouldStartInitialConversationDraft } from './lib/conversation-draft.js';
 import { loadSessionListPreferences, saveSessionListPreferences, sessionDisplayTitle, sortSessionsForSidebar } from './lib/session-list.js';
 import type { SessionListPreferencesV1 } from './lib/session-list.js';
 import { useOpenLab } from './lib/use-openlab.js';
 import { useInterfacePreferences } from './lib/interface-preferences.js';
-import { chatShellZhCN as shellCopy, hanaZhCN as copy, worktableZhCN as worktableCopy } from './i18n/zh-CN.js';
+import { chatShellZhCN as shellCopy, hanaZhCN as copy } from './i18n/zh-CN.js';
 
 const SettingsModal = lazy(async () => ({ default: (await import('./components/SettingsModal.js')).SettingsModal }));
 const GLOBAL_SESSION_LIST_SCOPE = 'all-conversations';
@@ -387,7 +388,7 @@ export function App() {
     updateLayout((current) => ({ ...current, workspaceWidth: next }));
   }, [layout.workspaceWidth, updateLayout, workspaceWidthLimit]);
 
-  const startDraftConversation = (temporary: boolean) => {
+  const startDraftConversation = useCallback((temporary: boolean) => {
     if (conversationDraft && conversationDraft.phase !== 'editing') return;
     setEditingMessage(undefined);
     setSessionTitleEdit(undefined);
@@ -398,25 +399,37 @@ export function App() {
       id,
       temporary,
       binding: normalizeDraftAgentBinding({
-      sessionId: `draft:${id}`,
-      current: conversationDraft?.binding ?? openlab.snapshot.sessionAgentBinding,
-      fallback: openlab.snapshot.sessionAgentBinding,
-      definitions: openlab.snapshot.agentDefinitions,
+        sessionId: `draft:${id}`,
+        current: conversationDraft?.binding ?? openlab.snapshot.sessionAgentBinding,
+        fallback: openlab.snapshot.sessionAgentBinding,
+        definitions: openlab.snapshot.agentDefinitions,
       }),
     });
     setWorkspaceMaximized(false);
     if (compactLayout) setCompactPanel(null);
     window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.app-mode-chat .composer textarea')?.focus());
-  };
+  }, [compactLayout, conversationDraft, openlab.snapshot.agentDefinitions, openlab.snapshot.sessionAgentBinding]);
   const beginDraftConversation = () => startDraftConversation(false);
   const beginTemporaryConversation = () => startDraftConversation(true);
 
-  const switchConversation = async (id: string) => {
+  useLayoutEffect(() => {
+    if (!shouldStartInitialConversationDraft({
+      connected: openlab.connected,
+      preview: openlab.preview,
+      primaryAgentConfigured: openlab.snapshot.primaryAgent.configured,
+      hasDraft: conversationDraft !== null,
+      projectId,
+      sessions: sessionCatalog,
+    })) return;
+    startDraftConversation(false);
+  }, [conversationDraft, openlab.connected, openlab.preview, openlab.snapshot.primaryAgent.configured, projectId, sessionCatalog, startDraftConversation]);
+
+  const switchConversation = async (id: string, preserveMode = false) => {
     if (conversationDraft && conversationDraft.phase !== 'editing') return;
     const revision = ++conversationSwitchRevision.current;
     setEditingMessage(undefined);
     setSessionTitleEdit(undefined);
-    setMode('chat');
+    if (!preserveMode) setMode('chat');
     dispatchConversationDraft({ type: 'cancel', ...(conversationDraft ? { draftId: conversationDraft.id } : {}) });
     if (compactLayout) setCompactPanel(null);
     const run = async () => {
@@ -676,6 +689,53 @@ export function App() {
     }
   };
 
+  const worktableChatDock = <>
+    <Timeline
+      nodes={conversationSnapshot.timeline}
+      approvals={conversationSnapshot.pendingApprovals}
+      variants={conversationSnapshot.turnVariants}
+      agents={conversationSnapshot.agentRuns}
+      tasks={conversationSnapshot.tasks}
+      agentDefinitions={conversationSnapshot.agentDefinitions}
+      primaryAgent={openlab.snapshot.primaryAgent}
+      timeZone={preferences.timeZone}
+      sessionKey={`worktable:${sessionKey}`}
+      onApprove={(id, approved) => void openlab.approve(id, approved)}
+      onRegenerate={openlab.regenerateTurn}
+      onFork={async (nodeId) => { if (!isDraftConversation && activeSession) await openlab.forkSession(activeSession.id, nodeId); }}
+      onEdit={(nodeId, content) => {
+        if (isDraftConversation || !activeSession) return;
+        setActionError(undefined);
+        setEditingMessage({ requestId: crypto.randomUUID(), nodeId, text: content, sessionId: activeSession.id });
+      }}
+      onQuote={quote}
+      onActivateVariant={openlab.activateTurnVariant}
+      onAgentAction={openlab.agentAction}
+      onAgentMessage={openlab.messageAgent}
+    />
+    <Composer
+      testId="worktable-composer"
+      models={openlab.snapshot.models}
+      skills={openlab.snapshot.skills}
+      agents={sessionMembers}
+      researchObjects={openlab.snapshot.researchObjects}
+      running={running || Boolean(conversationDraft && conversationDraft.phase !== 'editing')}
+      sessionKey={`worktable:${sessionKey}`}
+      {...(!isDraftConversation && activeSession?.model ? { preferredModel: activeSession.model } : {})}
+      injectedAttachments={injectedAttachments}
+      quotedNodes={quotedNodes}
+      editingMessage={editingMessage}
+      onRemoveInjectedAttachment={removeInjectedAttachment}
+      onRemoveQuotedNode={removeQuotedNode}
+      onClearInjected={clearInjected}
+      onOpenWorkspace={openRightWorkspace}
+      onCancelEditingMessage={() => setEditingMessage(undefined)}
+      onFinishEditingMessage={() => setEditingMessage(undefined)}
+      onSend={sendConversation}
+      onCancel={openlab.cancel}
+    />
+  </>;
+
   return <div className="app-shell">
     <Titlebar projectName={openlab.snapshot.project.name} projectFolderAvailable={projectFolderAvailable} mode={mode} leftSidebarOpen={leftSidebarOpen} bottomPanelOpen={bottomPanelOpen} runtimeConnected={openlab.connected} onToggleLeftSidebar={toggleLeftSidebar} onToggleBottomPanel={() => setBottomPanelOpen((value) => !value)} onTogglePinnedSummary={() => window.dispatchEvent(new Event('sci-workplace:toggle-pinned-summary'))} onOpenFileTree={() => toggleWorkspacePanel('workspace')} onOpenReviewPanel={() => toggleWorkspacePanel('files')} onPreviousChat={() => cycleConversation(-1)} onNextChat={() => cycleConversation(1)} onNewConversation={beginDraftConversation} onNewTemporaryConversation={beginTemporaryConversation} onOpenFolder={openFolderAsProject} onSettings={() => setSettingsOpen(true)}/>
     <div className="app-mode-stack">
@@ -881,7 +941,14 @@ export function App() {
       <button className={`chat-drawer-backdrop ${overlayOpen ? 'is-open' : 'is-closed'}`} data-testid="chat-drawer-backdrop" aria-label={copy.common.close} aria-hidden={!overlayOpen} disabled={!overlayOpen} onClick={closeOverlay}/>
     </div></div>
     <div className={`app-mode-layer app-mode-worktable ${mode === 'worktable' ? 'is-active' : ''}`} aria-hidden={mode !== 'worktable'} inert={mode !== 'worktable' ? true : undefined}>
-      {mode === 'worktable' && <section className="worktable-reserved" data-testid="worktable-shell"><button type="button" className="worktable-reserved__return" data-testid="worktable-return-chat" title={worktableCopy.navigation.returnChat} aria-label={worktableCopy.navigation.returnChat} onClick={() => setMode('chat')}><ArrowLeft size={17}/></button></section>}
+      {mode === 'worktable' && <WorktableShell
+        controller={openlab}
+        onReturnToChat={() => setMode('chat')}
+        onSwitchSession={(id) => { void switchConversation(id, true); }}
+        chatDock={worktableChatDock}
+        chatTitle={activeSessionTitle}
+        {...(activeSession ? { chatSubtitle: `${activeSession.model} · ${activeSession.status}` } : {})}
+      />}
     </div>
     <div className={`app-mode-layer app-mode-channels ${mode === 'channels' ? 'is-active' : ''}`} aria-hidden={mode !== 'channels'} inert={mode !== 'channels' ? true : undefined}><ChannelsView snapshot={openlab.snapshot} timeZone={preferences.timeZone} onReturnToChat={() => setMode('chat')} onCreate={openlab.createChannel} onActivate={openlab.activateChannel} onUpdate={openlab.updateChannel} onArchive={openlab.archiveChannel} onExport={openlab.exportChannel}/></div>
     </div>

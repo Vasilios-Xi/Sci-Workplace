@@ -13,7 +13,7 @@ import type {
 } from '@openlab/protocol';
 import type { SqliteEventStore } from '../events/event-store.js';
 import { PathGuard } from '../security/path-guard.js';
-import { atomicWriteJson, atomicWriteText } from '../util/files.js';
+import { atomicWriteJson, atomicWriteText, copyFilePortableSync } from '../util/files.js';
 import { isRecord, toJson } from '../util/json.js';
 import { sha256FileSync } from './file-hash.js';
 import { validateAnnotationSelector } from './annotation-store.js';
@@ -212,7 +212,7 @@ export class ArtifactRevisionStore {
       const destination = join(this.#archiveRoot, relativeObject);
       if (!existsSync(destination)) {
         mkdirSync(dirname(destination), { recursive: true });
-        copyFileSync(absolute, destination);
+        copyFilePortableSync(absolute, destination);
       }
       return { ...file, archivedPath: `.openlab/archive/${relativeObject}`, external: false };
     });

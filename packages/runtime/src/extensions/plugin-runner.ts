@@ -8,8 +8,8 @@ import net from 'node:net';
 import tls from 'node:tls';
 import dgram from 'node:dgram';
 import dns from 'node:dns';
-import type { OpenLabPlugin, PluginHost, PluginHostCapability } from '@openlab/plugin-sdk';
-import type { JsonValue } from '@openlab/protocol';
+import type { AnyOpenLabPlugin, PluginHost, PluginHostCapability, PluginHostV4 } from '@openlab/plugin-sdk';
+import type { HarnessPluginPermissionV4, JsonValue } from '@openlab/protocol';
 
 interface RpcRequest {
   jsonrpc: '2.0';
@@ -48,11 +48,19 @@ if (process.env.OPENLAB_PLUGIN_NETWORK !== '1') {
   syncBuiltinESMExports();
 }
 
-let plugin: OpenLabPlugin | undefined;
+let plugin: AnyOpenLabPlugin | undefined;
 let settings: Record<string, JsonValue> = {};
 let nextHostId = 1;
 const pendingHost = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
 const invocationControllers = new Map<string, AbortController>();
+type RuntimePluginHost = Omit<PluginHost, 'capabilities'> & Omit<PluginHostV4, 'capabilities'> & { readonly capabilities: PluginHostCapability[] };
+type V4RuntimeCapability = Extract<HarnessPluginPermissionV4, PluginHostCapability>;
+const V4_RUNTIME_CAPABILITIES = new Set<V4RuntimeCapability>([
+  'ui', 'workspace:read', 'workspace:edit', 'resources:read', 'documents:read', 'jobs:run', 'models:invoke',
+  'annotations:read', 'annotations:write', 'evidence:read', 'evidence:write', 'artifacts:write', 'artifacts:publish',
+  'research:read', 'research:write', 'plugin-storage', 'workbench:read', 'workbench:write', 'workbench:mount',
+  'workbench:propose-layout', 'browser:observe', 'browser:interact', 'generated-apps:build', 'toolchains:execute',
+]);
 
 async function withInvocationSignal<T>(invocationId: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
@@ -61,7 +69,7 @@ async function withInvocationSignal<T>(invocationId: string, run: (signal: Abort
   finally { invocationControllers.delete(invocationId); }
 }
 
-async function loadPlugin(): Promise<OpenLabPlugin> {
+async function loadPlugin(): Promise<AnyOpenLabPlugin> {
   if (plugin) return plugin;
   const imported = await import(pathToFileURL(resolve(pluginRoot, pluginEntry)).href);
   const exported = imported.default ?? imported.plugin;
@@ -70,8 +78,8 @@ async function loadPlugin(): Promise<OpenLabPlugin> {
   // shape as v1 without an apiVersion field. Keep that channel executable while
   // ensuring every later RPC observes an explicit, immutable API version.
   const raw = exported as Record<string, unknown>;
-  const candidate = (raw.apiVersion === undefined ? { ...raw, apiVersion: 1 } : raw) as unknown as OpenLabPlugin;
-  if (candidate.apiVersion !== 1 && candidate.apiVersion !== 2 && candidate.apiVersion !== 3) throw new Error('插件未导出兼容的 Sci Workplace plugin');
+  const candidate = (raw.apiVersion === undefined ? { ...raw, apiVersion: 1 } : raw) as unknown as AnyOpenLabPlugin;
+  if (candidate.apiVersion !== 1 && candidate.apiVersion !== 2 && candidate.apiVersion !== 3 && candidate.apiVersion !== 4) throw new Error('插件未导出兼容的 Sci Workplace plugin');
   plugin = candidate;
   return candidate;
 }
@@ -87,7 +95,7 @@ async function hostCall(invocationId: string, method: string, params: Record<str
   return await response;
 }
 
-function createHost(invocationId: string, capabilities: PluginHostCapability[]): PluginHost {
+function createHost(invocationId: string, capabilities: PluginHostCapability[]): RuntimePluginHost {
   const call = async <T>(method: string, params: Record<string, unknown> = {}) => await hostCall(invocationId, method, params) as T;
   return {
     capabilities: [...capabilities],
@@ -120,6 +128,11 @@ function createHost(invocationId: string, capabilities: PluginHostCapability[]):
     },
     toolchains: {
       list: async (kind) => await call('toolchains.list', { kind }),
+      adapters: async () => await call('toolchains.adapters'),
+      run: async (input) => await call('toolchains.run', { input }),
+      getRun: async (id) => await call('toolchains.getRun', { id }),
+      cancelRun: async (id) => await call('toolchains.cancelRun', { id }),
+      runLog: async (id, offset) => await call('toolchains.runLog', { id, offset }),
     },
     workflows: {
       start: async (workflowId, input, options) => await call('workflows.start', { workflowId, input, options }),
@@ -133,6 +146,10 @@ function createHost(invocationId: string, capabilities: PluginHostCapability[]):
       list: async (target) => await call('annotations.list', { target }),
       create: async (input) => await call('annotations.create', { input }),
       update: async (id, patch) => await call('annotations.update', { id, patch }),
+    },
+    evidence: {
+      list: async (target) => await call('evidence.list', { target }),
+      create: async (input) => await call('evidence.create', { input }),
     },
     artifacts: {
       revisions: async (artifactId) => await call('artifacts.revisions', { artifactId }),
@@ -172,6 +189,15 @@ function createHost(invocationId: string, capabilities: PluginHostCapability[]):
       mountArtifact: async (input) => await call('worktable.mountArtifact', { input }),
       setStatus: async (instanceId, status) => await call('worktable.setStatus', { instanceId, status }),
     },
+    workbenches: {
+      list: async () => await call('workbenches.list'),
+      inspect: async (instanceId) => await call('workbenches.inspect', { instanceId }),
+      create: async (input) => await call('workbenches.create', { input }),
+      open: async (instanceId) => await call('workbenches.open', { instanceId }),
+      mount: async (intent) => await call('workbenches.mount', { intent }),
+      proposeLayout: async (input) => await call('workbenches.proposeLayout', { input }),
+      reveal: async (input) => { await call('workbenches.reveal', { input }); },
+    },
     browser: {
       profiles: async () => await call('browser.profiles'),
       sessions: async () => await call('browser.sessions'),
@@ -182,7 +208,28 @@ function createHost(invocationId: string, capabilities: PluginHostCapability[]):
     generatedApps: {
       list: async () => await call('generatedApps.list'),
       publish: async (input) => await call('generatedApps.publish', { input }),
+      propose: async (prompt) => await call('generatedApps.propose', { prompt }),
     },
+  };
+}
+
+function createVersionedHost(
+  invocationId: string,
+  capabilities: PluginHostCapability[],
+  apiVersion: 2 | 3 | 4,
+): PluginHost | PluginHostV4 {
+  const host = createHost(invocationId, capabilities);
+  if (apiVersion !== 4) return host;
+  const { workbench: _legacyWorkbench, worktable: _legacyWorktable, workflows: _legacyWorkflows, generatedApps: _legacyGeneratedApps, ...v4Host } = host;
+  const v4Capabilities = capabilities.filter((capability): capability is V4RuntimeCapability => V4_RUNTIME_CAPABILITIES.has(capability as V4RuntimeCapability));
+  return {
+    ...v4Host,
+    capabilities: v4Capabilities,
+    workflows: {
+      ..._legacyWorkflows,
+      start: async (workflowId: string, input: Record<string, JsonValue>, options?: { workbenchInstanceId?: string }) => await _legacyWorkflows.start(workflowId, input, options?.workbenchInstanceId ? { worktableInstanceId: options.workbenchInstanceId } : undefined),
+    },
+    generatedApps: { list: _legacyGeneratedApps.list, propose: _legacyGeneratedApps.propose },
   };
 }
 
@@ -233,7 +280,7 @@ reader.on('line', (line) => {
           const capabilities = Array.isArray(context.capabilities) ? context.capabilities.filter((item): item is PluginHostCapability => typeof item === 'string') : [];
           result = await withInvocationSignal(invocationId, async (signal) => await tool.execute((request.params?.input ?? {}) as never, {
             projectId: String(context.projectId ?? ''), sessionId: String(context.sessionId ?? ''), agentId: String(context.agentId ?? ''),
-            traceId: String(context.traceId ?? ''), settings, host: createHost(invocationId, capabilities), signal,
+            traceId: String(context.traceId ?? ''), settings, host: createVersionedHost(invocationId, capabilities, active.apiVersion), signal,
           } as never));
         } else {
           result = await tool.execute((request.params?.input ?? {}) as never, { ...context, settings } as never);
@@ -246,8 +293,8 @@ reader.on('line', (line) => {
           const capabilities = Array.isArray(request.params?.capabilities) ? request.params.capabilities.filter((item): item is PluginHostCapability => typeof item === 'string') : [];
           result = await active.context({
             projectId: String(request.params?.projectId ?? ''), sessionId: String(request.params?.sessionId ?? ''), agentId: String(request.params?.agentId ?? ''),
-            settings, host: createHost(invocationId, capabilities),
-          });
+            settings, host: createVersionedHost(invocationId, capabilities, active.apiVersion),
+          } as never);
         } else result = await active.context({
           projectRoot: String(request.params?.projectRoot ?? ''),
           sessionId: String(request.params?.sessionId ?? ''),
@@ -266,9 +313,11 @@ reader.on('line', (line) => {
         result = await withInvocationSignal(invocationId, async (signal) => await workflow.run((request.params?.input ?? {}) as Record<string, JsonValue>, {
           projectId: String(context.projectId ?? ''), sessionId: String(context.sessionId ?? ''), agentId: String(context.agentId ?? ''),
           traceId: String(context.traceId ?? ''), jobId: String(context.jobId ?? ''), resume: context.resume === true,
-          ...(typeof context.worktableInstanceId === 'string' ? { worktableInstanceId: context.worktableInstanceId } : {}),
-          settings, host: createHost(invocationId, capabilities), signal,
-        }));
+          ...(typeof context.worktableInstanceId === 'string'
+            ? active.apiVersion === 4 ? { workbenchInstanceId: context.worktableInstanceId } : { worktableInstanceId: context.worktableInstanceId }
+            : {}),
+          settings, host: createVersionedHost(invocationId, capabilities, active.apiVersion), signal,
+        } as never));
       } else if (request.method === 'dispose') {
         await plugin?.dispose?.();
         result = true;

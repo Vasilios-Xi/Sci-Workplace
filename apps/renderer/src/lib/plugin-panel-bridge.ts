@@ -1,4 +1,4 @@
-export type PluginPanelBridgeMethod = 'context.read' | 'tool.execute' | 'evidence.reveal';
+export type PluginPanelBridgeMethod = 'context.read' | 'tool.execute' | 'evidence.reveal' | 'resource.open';
 
 export interface PluginPanelBridgeRequest {
   id: string;
@@ -11,7 +11,7 @@ interface PluginPanelMessageTarget {
   postMessage(message: unknown, targetOrigin: string, transfer?: Transferable[]): void;
 }
 
-const methods = new Set<PluginPanelBridgeMethod>(['context.read', 'tool.execute', 'evidence.reveal']);
+const methods = new Set<PluginPanelBridgeMethod>(['context.read', 'tool.execute', 'evidence.reveal', 'resource.open']);
 
 function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);

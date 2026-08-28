@@ -61,10 +61,16 @@ function applyMessage(snapshot: BootstrapSnapshot, message: ServerPushMessage): 
         return { ...snapshot, workbench: message.workbench, workbenchContributions: message.contributions };
     if (message.type === 'worktable.changed')
         return { ...snapshot, worktable: message.worktable, worktableTemplates: message.templates };
+    if (message.type === 'workbench-v1.changed')
+        return { ...snapshot, workbenchBlueprints: message.blueprints, workbenchInstances: message.instances, layoutProposals: message.proposals };
+    if (message.type === 'scientific-kernel.changed')
+        return { ...snapshot, evidenceAnchors: message.evidenceAnchors, runRecords: message.runs, reviewRequests: message.reviews };
     if (message.type === 'browser.changed')
         return { ...snapshot, browserProfiles: message.profiles, browserSessions: message.sessions };
     if (message.type === 'generated-app.changed')
         return { ...snapshot, generatedApps: message.apps };
+    if (message.type === 'generated-blueprints.changed')
+        return { ...snapshot, generatedAppBlueprints: message.blueprints };
     if (message.type === 'annotations.changed')
         return { ...snapshot, annotations: message.annotations, annotationSets: message.annotationSets };
     if (message.type === 'artifact-revisions.changed')
@@ -75,6 +81,10 @@ function applyMessage(snapshot: BootstrapSnapshot, message: ServerPushMessage): 
         return { ...snapshot, jobs: message.jobs };
     if (message.type === 'toolchains.changed')
         return { ...snapshot, toolchains: message.toolchains };
+    if (message.type === 'tool-runs.changed')
+        return { ...snapshot, toolchainAdapters: message.adapters, toolRuns: message.runs };
+    if (message.type === 'paper-readers.changed')
+        return { ...snapshot, paperReaders: message.readers };
     if (message.type === 'approval.changed')
         return { ...snapshot, pendingApprovals: message.approvals };
     return snapshot;
@@ -451,6 +461,12 @@ export function useOpenLab() {
         if (preview) return await updateWorktableInstance(id, { layout, panes, ...(activePaneId ? { activePaneId } : {}) });
         return mergeWorktableInstance(await client.request<WorktableInstance>(`/api/worktable/instances/${encodeURIComponent(id)}/layout`, { method: 'POST', body: JSON.stringify({ layout, panes, ...(activePaneId ? { activePaneId } : {}) }) }));
     }, [client, mergeWorktableInstance, preview, updateWorktableInstance]);
+    const decideWorkbenchLayoutProposal = useCallback(async (id: string, accepted: boolean) => {
+        if (preview) return undefined;
+        const proposal = await client.request(`/api/workbench-v1/layout-proposals/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify({ accepted, confirmed: true }) });
+        await refresh();
+        return proposal;
+    }, [client, preview, refresh]);
     const mountWorktableContent = useCallback(async (instanceId: string, paneId: string, input: { title: string; content: WorktableContent }): Promise<WorktableTab> => {
         if (preview) {
             const instance = snapshot.worktable.instances.find((candidate) => candidate.id === instanceId);
@@ -538,6 +554,37 @@ export function useOpenLab() {
     const previewTerminalAction = useCallback(async (terminalId: string, input: Record<string, unknown>): Promise<JsonValue | undefined> => preview ? undefined : await client.request(`/api/terminal/previews/${encodeURIComponent(terminalId)}`, { method: 'POST', body: JSON.stringify(input) }), [client, preview]);
     const scmAction = useCallback(async (instanceId: string, input: Record<string, unknown>): Promise<JsonValue | undefined> => preview ? undefined : await client.request(`/api/worktable/instances/${encodeURIComponent(instanceId)}/scm`, { method: 'POST', body: JSON.stringify(input) }), [client, preview]);
     const loadGeneratedApp = useCallback(async (appId: string, revisionId: string): Promise<{ url: string } | undefined> => preview ? undefined : await client.request(`/api/generated-apps/${encodeURIComponent(appId)}/revisions/${encodeURIComponent(revisionId)}/ticket`, { method: 'POST', body: '{}' }), [client, preview]);
+    const proposeGeneratedWorkbench = useCallback(async (prompt: string) => {
+        if (preview) return undefined;
+        const blueprint = await client.request('/api/generated-blueprints', { method: 'POST', body: JSON.stringify({ prompt }) });
+        await refresh();
+        return blueprint;
+    }, [client, preview, refresh]);
+    const decideGeneratedWorkbench = useCallback(async (id: string, accepted: boolean) => {
+        if (preview) return undefined;
+        const blueprint = await client.request(`/api/generated-blueprints/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify({ accepted, confirmed: true }) });
+        await refresh();
+        return blueprint;
+    }, [client, preview, refresh]);
+    const previewGeneratedWorkbench = useCallback(async (id: string): Promise<{ url: string; expiresAt: string } | undefined> => preview ? undefined : await client.request(`/api/generated-blueprints/${encodeURIComponent(id)}/preview-ticket`, { method: 'POST', body: '{}' }), [client, preview]);
+    const acceptGeneratedWorkbench = useCallback(async (id: string) => {
+        if (preview) return undefined;
+        const result = await client.request(`/api/generated-blueprints/${encodeURIComponent(id)}/accept`, { method: 'POST', body: JSON.stringify({ confirmed: true }) });
+        await refresh();
+        return result;
+    }, [client, preview, refresh]);
+    const runToolchainAdapter = useCallback(async (adapterId: string, operationId: string, values: Record<string, JsonValue>, instanceId?: string) => {
+        if (preview) return undefined;
+        const run = await client.request(`/api/toolchain-adapters/${encodeURIComponent(adapterId)}/operations/${encodeURIComponent(operationId)}/run`, { method: 'POST', body: JSON.stringify({ values, ...(instanceId ? { instanceId } : {}), confirmed: true }) });
+        await refresh();
+        return run;
+    }, [client, preview, refresh]);
+    const cancelToolchainRun = useCallback(async (id: string) => {
+        if (preview) return undefined;
+        const run = await client.request(`/api/toolchain-runs/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' });
+        await refresh();
+        return run;
+    }, [client, preview, refresh]);
     const getWorktableUiState = useCallback(async (instanceId: string): Promise<WorktableDeviceUiState | undefined> => preview ? undefined : await window.openlab?.getWorktableUiState(instanceId), [preview]);
     const saveWorktableUiState = useCallback(async (instanceId: string, patch: Partial<WorktableDeviceUiState>): Promise<void> => {
         if (!preview) await window.openlab?.updateWorktableUiState(instanceId, patch);
@@ -643,6 +690,11 @@ export function useOpenLab() {
             throw new Error(t("copy271"));
         return await client.request(`/api/plugins/${encodeURIComponent(pluginId)}/panels/${encodeURIComponent(panelId)}/reveal`, { method: 'POST', body: JSON.stringify({ tabId, ...(worktable ? { worktableInstanceId: worktable.instanceId, paneId: worktable.paneId } : {}), document, selector, ...(target ? { target } : {}) }) });
     }, [client, preview]);
+    const pluginPanelResource = useCallback(async (document: DocumentRevisionRef): Promise<{ url: string; expiresAt: string }> => {
+        if (preview) throw new Error(t("copy271"));
+        const handle = await openResource(document);
+        return await client.request(`/api/resources/${encodeURIComponent(handle.id)}/ticket`, { method: 'POST', body: '{}' });
+    }, [client, openResource, preview]);
     const pluginAction = useCallback(async (id: string, action: 'enable' | 'disable' | 'reload' | 'uninstall') => {
         if (preview)
             throw new Error(t("copy272"));
@@ -670,7 +722,7 @@ export function useOpenLab() {
             setSnapshot((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
             return;
         }
-        await client.request('/api/settings/harness', { method: 'POST', body: JSON.stringify(patch) });
+        await client.request('/api/settings/harness', { method: 'POST', body: JSON.stringify({ ...patch, ...(patch.developerMode === true ? { confirmed: true } : {}) }) });
         await refresh();
     }, [client, preview, refresh]);
     const configurePrimaryAgent = useCallback(async (update: PrimaryAgentProfileUpdate) => {
@@ -681,6 +733,21 @@ export function useOpenLab() {
             body: JSON.stringify({ ...update, confirmed: true }),
         });
         await window.openlab?.invalidateInactiveRuntimes();
+        await refresh();
+    }, [client, preview, refresh]);
+    const updatePluginCatalog = useCallback(async () => {
+        if (!window.openlab || preview) throw new Error(t("copy269"));
+        const path = await window.openlab.choosePluginCatalogIndex();
+        if (!path) return;
+        await client.request('/api/plugin-catalog/update-file', { method: 'POST', body: JSON.stringify({ path, confirmed: true }) });
+        await refresh();
+    }, [client, preview, refresh]);
+    const installCuratedPlugin = useCallback(async (id: string, scope: 'user' | 'project' = 'project') => {
+        if (!window.openlab || preview) throw new Error(t("copy269"));
+        const path = await window.openlab.chooseCuratedPluginPackage();
+        if (!path) return;
+        await client.request(`/api/plugin-catalog/${encodeURIComponent(id)}/install-file`, { method: 'POST', body: JSON.stringify({ path, scope, confirmed: true }) });
+        await window.openlab.invalidateInactiveRuntimes();
         await refresh();
     }, [client, preview, refresh]);
     const updateUserProfile = useCallback(async (update: UserProfileUpdate) => {
@@ -850,12 +917,12 @@ export function useOpenLab() {
         listWorkspace, searchWorkspace, previewWorkspace, createWorkspaceAttachment, saveWorkspaceNote, activateWorkspaceRoot, confirmWorkspaceRoot, revokeWorkspaceRoot,
         authorizeWorkspaceRoot, operateWorkspaceFile, undoWorkspaceFile, addConversationFile, removeConversationFile,
         openWorkbench, closeWorkbench, activateWorkbench, setWorkbenchView, maximizeWorkbench,
-        createWorktableInstance, activateWorktableInstance, updateWorktableInstance, archiveWorktableInstance, restoreWorktableInstance, setWorktableLayout, mountWorktableContent, activateWorktableTab, closeWorktableTab,
-        createBrowserProfile, openBrowserSession, browserObserve, browserAction, setBrowserBounds, hideAllBrowsers, closeBrowserSession, terminalAction, previewTerminalAction, scmAction, loadGeneratedApp, getWorktableUiState, saveWorktableUiState,
+        createWorktableInstance, activateWorktableInstance, updateWorktableInstance, archiveWorktableInstance, restoreWorktableInstance, setWorktableLayout, decideWorkbenchLayoutProposal, mountWorktableContent, activateWorktableTab, closeWorktableTab,
+        createBrowserProfile, openBrowserSession, browserObserve, browserAction, setBrowserBounds, hideAllBrowsers, closeBrowserSession, terminalAction, previewTerminalAction, scmAction, loadGeneratedApp, proposeGeneratedWorkbench, decideGeneratedWorkbench, previewGeneratedWorkbench, acceptGeneratedWorkbench, runToolchainAdapter, cancelToolchainRun, getWorktableUiState, saveWorktableUiState,
         openDocument, updateDocument, saveDocument, closeDocument, previewWorkspaceEdit, applyWorkspaceEdit, undoWorkspaceEdit,
         openResource, readResource, resourceAccess, releaseResource, createAnnotation, updateAnnotation, submitAnnotations,
         runJob, cancelJob, pauseJob, resumeJob, jobLog, createArtifactRevision, archiveArtifactRevision, registerSourceMap, installToolchain,
-        agentAction, messageAgent, installExtension, installSkillSource, approveSkill, configureMcp, mcpAction, loadPluginPanel, pluginPanelContext, pluginPanelTool, pluginPanelReveal, pluginAction, updateSettings, updatePluginSettings,
+        agentAction, messageAgent, installExtension, updatePluginCatalog, installCuratedPlugin, installSkillSource, approveSkill, configureMcp, mcpAction, loadPluginPanel, pluginPanelContext, pluginPanelTool, pluginPanelReveal, pluginPanelResource, pluginAction, updateSettings, updatePluginSettings,
         configurePrimaryAgent, updateUserProfile, createAgent, updateAgent, archiveAgentDefinition, importAgent, exportAgent, setSessionAgents, refreshAgentTools, setAgentToolPolicy, setProjectAgentCapabilities,
         listMemories, createMemory, updateMemory, deleteMemory, clearMemories,
         createChannel, activateChannel, updateChannel, archiveChannel, exportChannel,

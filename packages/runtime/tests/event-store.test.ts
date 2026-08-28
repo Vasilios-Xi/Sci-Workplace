@@ -28,12 +28,27 @@ describe('SQLite event store', () => {
 
   it('migrates to the current schema and rolls back a failed append transaction', () => {
     const store = new SqliteEventStore(join(temporaryDirectory(), 'events.db'));
-    expect(store.schemaVersion()).toBe(4);
+    expect(store.schemaVersion()).toBe(5);
     expect(() => store.append({
       streamId: 'session:a', kind: 'invalid', actor: { id: 'tester', kind: 'user' }, payload: { invalid: 1n } as never,
     })).toThrow();
     const recovered = store.append({ streamId: 'session:a', kind: 'valid', actor: { id: 'tester', kind: 'user' }, payload: { ok: true } });
     expect(recovered.sequence).toBe(1);
+    store.close();
+  });
+
+  it('deduplicates idempotent writes while preserving device and entity revisions', () => {
+    const store = new SqliteEventStore(join(temporaryDirectory(), 'events.db'));
+    const input = {
+      streamId: 'workbench:one', kind: 'workbench.mounted', actor: { id: 'owner', kind: 'user' as const },
+      deviceId: 'device-a', idempotencyKey: 'mount:artifact:one', revision: 7, payload: { artifactId: 'artifact-1' },
+    };
+    const first = store.append(input);
+    const duplicate = store.append(input);
+    expect(duplicate.id).toBe(first.id);
+    expect(duplicate).toMatchObject({ sequence: 1, deviceId: 'device-a', idempotencyKey: 'mount:artifact:one', revision: 7 });
+    expect(store.list('workbench:one')).toHaveLength(1);
+    expect(() => store.append({ ...input, payload: { artifactId: 'artifact-2' } })).toThrow(/幂等键/u);
     store.close();
   });
 

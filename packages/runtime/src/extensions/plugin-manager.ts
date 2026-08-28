@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import AdmZip from 'adm-zip';
 import AjvModule, { type ErrorObject, type ValidateFunction } from 'ajv';
-import type { AgentPreset, AgentTemplate, ContextContribution, JsonValue, PluginManifest, PluginPermission, PluginWorkflowDefinition, PluginWorkflowResult, ToolDefinition, ToolExecutionResult, ToolRenderHint, WorkbenchContribution, WorkbenchViewDescriptor, WorktableContent, WorktableTemplateContribution } from '@openlab/protocol';
+import type { AgentPreset, AgentTemplate, ContextContribution, JsonValue, PluginManifest, PluginWorkflowDefinition, PluginWorkflowResult, ToolDefinition, ToolExecutionResult, ToolRenderHint, WorkbenchBlueprintV1, WorkbenchContribution, WorkbenchViewDescriptor, WorktableContent, WorktableTemplateContribution } from '@openlab/protocol';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { atomicWriteJson, readJsonFile } from '../util/files.js';
 import { readPluginManifest } from './plugin-manifest.js';
@@ -114,8 +114,8 @@ export function validatePluginDescription(manifest: PluginManifest, description:
     }
     if (tool.risk === 'delete' && !manifest.permissions.includes(expectedApiVersion === 1 ? 'project:write' : 'workspace:edit')) throw new Error(`插件工具 ${tool.name} 缺少文件删除权限`);
     if (tool.risk === 'write') {
-      const mutationPermissions: PluginPermission[] = expectedApiVersion !== 1
-        ? ['workspace:edit', 'annotations:write', 'artifacts:write', 'research:write', 'worktable:write', 'browser:interact', 'generated-apps:publish']
+      const mutationPermissions: PluginManifest['permissions'] = expectedApiVersion !== 1
+        ? ['workspace:edit', 'annotations:write', 'artifacts:write', 'artifacts:publish', 'evidence:write', 'research:write', 'worktable:write', 'workbench:write', 'workbench:mount', 'browser:interact', 'generated-apps:publish', 'generated-apps:build', 'toolchains:execute']
         : ['project:write'];
       if (!mutationPermissions.some((permission) => manifest.permissions.includes(permission))) throw new Error(`插件工具 ${tool.name} 缺少写入能力`);
     }
@@ -304,6 +304,11 @@ export class PluginManager {
     });
   }
 
+  workbenchBlueprints(): WorkbenchBlueprintV1[] {
+    return [...this.#processes.keys()].flatMap((id) => (this.require(id).manifest.contributes.workbenchBlueprints ?? [])
+      .map((blueprint) => ({ ...structuredClone(blueprint), pluginId: id })));
+  }
+
   workflows(id?: string): Array<{ pluginId: string; definition: PluginWorkflowDefinition }> {
     const entries: Array<{ pluginId: string; definition: PluginWorkflowDefinition }> = [];
     for (const [pluginId, description] of this.#descriptions) {
@@ -343,7 +348,7 @@ export class PluginManager {
     pluginId: string,
     workflowId: string,
     input: Record<string, JsonValue>,
-    context: { projectId: string; sessionId: string; agentId?: string; traceId?: string; capabilities: PluginPermission[]; worktableInstanceId?: string },
+    context: { projectId: string; sessionId: string; agentId?: string; traceId?: string; capabilities: PluginManifest['permissions']; worktableInstanceId?: string },
     jobId: string,
     resume: boolean,
     signal?: AbortSignal,
@@ -809,11 +814,11 @@ export class PluginManager {
     });
   }
 
-  private hostCapabilities(manifest: PluginManifest, contextOnly: boolean): PluginPermission[] {
+  private hostCapabilities(manifest: PluginManifest, contextOnly: boolean): PluginManifest['permissions'] {
     if ((manifest.apiVersion ?? 1) === 1) return [];
-    const allowed = new Set<PluginPermission>(contextOnly
-      ? ['workspace:read', 'resources:read', 'annotations:read', 'research:read', 'plugin-storage', 'worktable:read', 'browser:observe']
-      : ['workspace:read', 'workspace:edit', 'resources:read', 'jobs:run', 'models:run', 'models:invoke', 'annotations:read', 'annotations:write', 'artifacts:write', 'research:read', 'research:write', 'plugin-storage', 'ui', 'worktable:read', 'worktable:write', 'browser:observe', 'browser:interact', 'generated-apps:publish']);
+    const allowed = new Set<PluginManifest['permissions'][number]>(contextOnly
+      ? ['workspace:read', 'resources:read', 'documents:read', 'annotations:read', 'evidence:read', 'research:read', 'plugin-storage', 'worktable:read', 'workbench:read', 'browser:observe']
+      : ['workspace:read', 'workspace:edit', 'resources:read', 'documents:read', 'jobs:run', 'models:run', 'models:invoke', 'annotations:read', 'annotations:write', 'evidence:read', 'evidence:write', 'artifacts:write', 'artifacts:publish', 'research:read', 'research:write', 'plugin-storage', 'ui', 'worktable:read', 'worktable:write', 'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout', 'browser:observe', 'browser:interact', 'generated-apps:publish', 'generated-apps:build', 'toolchains:execute']);
     return manifest.permissions.filter((permission) => allowed.has(permission));
   }
 

@@ -45,6 +45,8 @@ interface Window {
     startConversation(input: import('@openlab/protocol').DesktopConversationStartInput): Promise<import('@openlab/protocol').DesktopConversationStartResult>;
     activateConversation(input: import('@openlab/protocol').ConversationActivateInput): Promise<import('@openlab/protocol').DesktopConversationActivateResult>;
     chooseExtension(kind: 'skill' | 'plugin'): Promise<string | undefined>;
+    choosePluginCatalogIndex(): Promise<string | undefined>;
+    chooseCuratedPluginPackage(): Promise<string | undefined>;
     chooseToolchain(): Promise<string | undefined>;
     chooseAttachments(): Promise<OpenLabAttachment[]>;
     importDroppedAttachments(files: File[]): Promise<OpenLabAttachment[]>;

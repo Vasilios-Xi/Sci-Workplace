@@ -273,6 +273,15 @@ export const hanaZhCN = {
     isolationTitle: '不可关闭的安全边界',
     isolationDescription: '插件独立进程、Node 权限模型、Windows Job Object、路径校验、能力快照和完整审计始终生效。',
     isolationValue: '分层防护',
+    developerMode: {
+      title: '插件开发者模式',
+      description: '仅用于安装未签名的本地插件目录或 ZIP；关闭时此类插件会立即停用。策展市场中的签名包不需要开启。',
+      enable: '开启开发者模式',
+      disable: '关闭开发者模式',
+      confirmTitle: '开启插件开发者模式',
+      confirm: '确认开启',
+      warning: '开发者模式允许安装和启动未经平台签名的本地目录或 ZIP。插件仍受沙箱与权限代理限制，但你必须自行信任其来源。',
+    },
     allowWarning: '你正在把高风险能力设置为“允许”。后续符合该类别的 Agent 工具调用可能不再逐次弹出审批，但仍会记录审计与受其他安全边界限制。确定继续吗？',
     reset: '恢复默认策略',
     resetConfirm: '恢复默认权限策略？项目读取将允许，其他能力将改为每次询问。',
@@ -1190,11 +1199,42 @@ export const worktableZhCN = {
     sandbox: '插件面板运行在受限沙盒中。', missingTool: '插件面板没有指定工具。',
     confirmationRequiredMarker: '需要用户明确确认',
     confirmTitle: '确认插件操作', confirmTool: '插件请求执行写操作“{tool}”，是否允许？', confirm: '允许',
+    paperBatchTitle: '确认全文模型处理', paperBatchConfirm: (model: string, calls: number, estimated: number, maximum: number) =>
+      `本次将把当前 PDF 修订的全文来源块发送给模型 ${model}，自动完成深度解读、术语表生成和逐段翻译。预计 ${calls} 次模型调用、约 ${estimated} token；硬上限 ${maximum} token。确认后任务内不再逐次询问。模型建议的术语不会冒充用户冻结；只有你明确冻结的术语才进入硬质量门。`,
+    paperBatchAccept: '确认并自动处理全文',
+    paperBatchPreviewRequired: '请先生成离线调用量预览', paperBatchUnconfiguredModel: '未配置',
     cancelled: '用户取消了插件操作。', invalidReveal: '插件提供的证据跳转参数无效。',
   },
   chatDock: {
     title: '绑定对话', expand: '展开绑定对话', collapse: '折叠绑定对话', unbound: '未绑定对话', bind: '绑定会话',
     bindHint: '只有你可以修改绑定；在对话页切换会话不会改变这里。', empty: '为此工作台绑定一个会话后，可在这里继续讨论。',
+  },
+  studio: {
+    layout: {
+      title: '布局提案', empty: '暂无待确认的窗格变更。', confirmTitle: '布局变更确认',
+      applyQuestion: '应用预览中的布局差异？', rejectQuestion: '拒绝这项布局变更？', apply: '应用布局', reject: '拒绝', confirm: '确认布局',
+      basedOn: (revision: number) => `基于 r${revision}`,
+      current: '当前', proposal: '提案', currentPanes: (count: number) => `${count} 个窗格`, proposalPanes: (panes: number, slots: number) => `${panes} 个窗格 · ${slots} 个角色槽位`,
+    },
+    generated: {
+      title: '提示词生成应用', placeholder: '描述需要的科研交互界面。宿主会先生成 WorkbenchBlueprint，再展示布局与能力声明。', generate: '生成蓝图',
+      confirmTitle: '生成应用确认', acceptBlueprintQuestion: '确认蓝图中的布局、能力与网络声明，并开始构建？', rejectBlueprintQuestion: '拒绝这份生成应用蓝图？',
+      build: '确认并构建', reject: '拒绝', layout: '布局', capabilities: '能力', network: '网络', noCapability: '无宿主能力', networkDenied: '禁止联网',
+      topology: (panes: number, slots: number) => `${panes} 窗格 / ${slots} 槽位`,
+      preview: '沙箱预览', previewTitle: '生成应用沙箱预览', accept: '接受并挂载', acceptTitle: '接受沙箱预览', acceptQuestion: '接受这个不可变版本并挂载为新的工作台实例？',
+    },
+    toolchain: {
+      title: '外部工具链代理', simulator: '科研绘图工具链模拟器',
+      description: '验证发现、授权、隔离运行、取消、日志和产物回收契约；不依赖 Origin/C4D。',
+      confirmTitle: '授权外部工具链', confirmQuestion: '模拟程序将在隔离暂存目录运行，并把 JSON 产物回收到当前 Workbench。', run: '运行验证', runConfirm: '运行模拟适配器', cancel: '取消',
+      result: (jobId: string, revisions: number) => `Job ${jobId} · 回收修订 ${revisions}`,
+    },
+    catalog: {
+      title: '策展插件目录', sequence: (value: number) => `签名索引 sequence ${value}`, trustedCache: '可信离线缓存', empty: '尚未导入签名目录',
+      permissions: (value: string) => `权限 ${value || '无'}`, importIndex: '导入签名索引', install: '选择签名包安装',
+      importQuestion: '导入平台签名的离线插件目录？宿主会校验 Ed25519 签名与递增 sequence。', installQuestion: (name: string, version: string) => `为“${name}” ${version} 选择本地 ZIP？宿主会再次校验包哈希、v4 清单、权限与撤回状态。`,
+      confirmTitle: '验证策展插件目录', confirmImport: '选择索引', confirmInstall: '选择并安装',
+    },
   },
   errors: {
     actionFailed: '工作台操作失败', missingPane: '布局引用了不存在的窗格', unavailableContent: '此内容当前无法渲染',

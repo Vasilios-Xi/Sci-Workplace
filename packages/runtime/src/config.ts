@@ -25,6 +25,8 @@ export interface RuntimeConfig {
   projectRoots?: string[];
   home: string;
   demo: boolean;
+  /** Keep the first empty session transient until the user explicitly starts a conversation. */
+  deferInitialSession?: boolean;
   deepSeekApiKey?: string;
   credentials?: Record<string, string>;
   /** Authenticated loopback broker owned by Electron Main. It exposes browser actions but never profile credentials. */
@@ -35,7 +37,7 @@ export interface RuntimeConfig {
 
 export function defaultOpenLabHome(): string {
   const base = process.env.APPDATA || process.env.LOCALAPPDATA || join(process.cwd(), '.openlab', 'runtime');
-  return resolve(base, 'OpenLab');
+  return resolve(base, 'SciWorkplace');
 }
 
 export function runtimePaths(home: string): RuntimePaths {
