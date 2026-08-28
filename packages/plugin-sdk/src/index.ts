@@ -35,6 +35,13 @@ import type {
   BrowserObservation,
   BrowserProfileSummary,
   BrowserSessionSummary,
+  BibliographicRecordV1,
+  BibliographyResolveRequestV1,
+  BibliographyResolutionV1,
+  BibliographyVerificationV1,
+  CitationDocumentInspectionV1,
+  CitationDocumentPlanV1,
+  CitationMaterializationReceiptV1,
   GeneratedWorktableApp,
   GeneratedAppBlueprintV1,
   HarnessPluginPermissionV4,
@@ -51,6 +58,13 @@ import type {
   WorktableInstance,
   WorktableRevealTarget,
   WorktableState,
+  OaAttachmentReceiptV1,
+  ZoteroItemV1,
+  ZoteroSearchRequestV1,
+  ZoteroStatusV1,
+  ZoteroSyncPlanRequestV1,
+  ZoteroSyncPlanV1,
+  ZoteroSyncReceiptV1,
 } from '@openlab/protocol';
 
 export type {
@@ -81,6 +95,23 @@ export type {
   BrowserObservation,
   BrowserProfileSummary,
   BrowserSessionSummary,
+  BibliographicCreatorV1,
+  BibliographicRecordV1,
+  BibliographyCandidateV1,
+  BibliographyQueryV1,
+  BibliographyResolveRequestV1,
+  BibliographyResolutionV1,
+  BibliographyVerificationV1,
+  CitationDecisionStatusV1,
+  CitationDocumentEditV1,
+  CitationDocumentInspectionV1,
+  CitationDocumentPlanV1,
+  CitationDocumentUnitV1,
+  CitationIdentifierV1,
+  CitationMaterializationReceiptV1,
+  CitationSourceFormatV1,
+  CitationStyleFamilyV1,
+  CitationUnitKindV1,
   GeneratedWorktableApp,
   EvidenceAnchorV1,
   GeneratedAppBlueprintV1,
@@ -100,6 +131,17 @@ export type {
   WorktableContextSnapshot,
   WorktableInstance,
   WorktableState,
+  OaAttachmentReceiptV1,
+  ZoteroCollectionTargetV1,
+  ZoteroItemV1,
+  ZoteroSearchRequestV1,
+  ZoteroStatusV1,
+  ZoteroSyncItemReceiptV1,
+  ZoteroSyncItemV1,
+  ZoteroSyncOperationV1,
+  ZoteroSyncPlanRequestV1,
+  ZoteroSyncPlanV1,
+  ZoteroSyncReceiptV1,
 } from '@openlab/protocol';
 
 export const OPENLAB_PLUGIN_API_VERSION = 4 as const;
@@ -132,7 +174,12 @@ export type PluginHostCapability =
   | 'workbench:mount'
   | 'workbench:propose-layout'
   | 'generated-apps:build'
-  | 'toolchains:execute';
+  | 'toolchains:execute'
+  | 'bibliography:resolve'
+  | 'bibliography:attachments'
+  | 'zotero:read'
+  | 'zotero:write'
+  | 'zotero:documents';
 
 export interface WorkspaceHostApi {
   list(ref: WorkspacePathRef): Promise<WorkspaceEntry[]>;
@@ -284,6 +331,23 @@ export interface EvidenceHostApiV4 {
   }): Promise<EvidenceAnchorV1>;
 }
 
+/** Harness-owned deterministic metadata resolution and lawful OA retrieval. */
+export interface BibliographyHostApiV1 {
+  scanDocument(source: DocumentRevisionRef): Promise<CitationDocumentInspectionV1>;
+  resolve(request: BibliographyResolveRequestV1): Promise<BibliographyResolutionV1[]>;
+  verifyMetadata(record: BibliographicRecordV1): Promise<BibliographyVerificationV1>;
+  fetchOpenAccess(record: BibliographicRecordV1): Promise<OaAttachmentReceiptV1>;
+}
+
+/** Harness-owned Zotero bridge. Plugins never receive ports, tokens, or process access. */
+export interface ZoteroHostApiV1 {
+  status(): Promise<ZoteroStatusV1>;
+  search(request: ZoteroSearchRequestV1): Promise<ZoteroItemV1[]>;
+  planSync(request: ZoteroSyncPlanRequestV1): Promise<ZoteroSyncPlanV1>;
+  commitSync(planId: string, confirmed: boolean): Promise<ZoteroSyncReceiptV1>;
+  materializeCitationDocument(plan: CitationDocumentPlanV1): Promise<CitationMaterializationReceiptV1>;
+}
+
 /** Public v4 API. `WorktableHostApi` is retained only for installed v3 code. */
 export interface WorkbenchHostApiV4 {
   list(): Promise<WorkbenchInstanceV1[]>;
@@ -353,6 +417,8 @@ export type PluginHostV4 = Omit<PluginHost, 'capabilities' | 'toolchains' | 'wor
   evidence: EvidenceHostApiV4;
   workbenches: WorkbenchHostApiV4;
   generatedApps: GeneratedAppHostApiV4;
+  bibliography: BibliographyHostApiV1;
+  zotero: ZoteroHostApiV1;
 };
 
 export interface PluginExecutionContext {

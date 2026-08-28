@@ -60,6 +60,7 @@ const V4_RUNTIME_CAPABILITIES = new Set<V4RuntimeCapability>([
   'annotations:read', 'annotations:write', 'evidence:read', 'evidence:write', 'artifacts:write', 'artifacts:publish',
   'research:read', 'research:write', 'plugin-storage', 'workbench:read', 'workbench:write', 'workbench:mount',
   'workbench:propose-layout', 'browser:observe', 'browser:interact', 'generated-apps:build', 'toolchains:execute',
+  'bibliography:resolve', 'bibliography:attachments', 'zotero:read', 'zotero:write', 'zotero:documents',
 ]);
 
 async function withInvocationSignal<T>(invocationId: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -150,6 +151,19 @@ function createHost(invocationId: string, capabilities: PluginHostCapability[]):
     evidence: {
       list: async (target) => await call('evidence.list', { target }),
       create: async (input) => await call('evidence.create', { input }),
+    },
+    bibliography: {
+      scanDocument: async (source) => await call('bibliography.scanDocument', { source }),
+      resolve: async (request) => await call('bibliography.resolve', { request }),
+      verifyMetadata: async (record) => await call('bibliography.verifyMetadata', { record }),
+      fetchOpenAccess: async (record) => await call('bibliography.fetchOpenAccess', { record }),
+    },
+    zotero: {
+      status: async () => await call('zotero.status'),
+      search: async (request) => await call('zotero.search', { request }),
+      planSync: async (request) => await call('zotero.planSync', { request }),
+      commitSync: async (planId, confirmed) => await call('zotero.commitSync', { planId, confirmed }),
+      materializeCitationDocument: async (plan) => await call('zotero.materializeCitationDocument', { plan }),
     },
     artifacts: {
       revisions: async (artifactId) => await call('artifacts.revisions', { artifactId }),

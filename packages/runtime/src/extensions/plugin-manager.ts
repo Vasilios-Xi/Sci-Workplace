@@ -15,7 +15,7 @@ import { namespacedToolName } from './extension-tool-name.js';
 export interface InstalledPlugin {
   manifest: PluginManifest;
   root: string;
-  scope: 'user' | 'project';
+  scope: 'bundled' | 'user' | 'project';
   enabled: boolean;
   trusted: boolean;
   sha256: string;
@@ -115,7 +115,7 @@ export function validatePluginDescription(manifest: PluginManifest, description:
     if (tool.risk === 'delete' && !manifest.permissions.includes(expectedApiVersion === 1 ? 'project:write' : 'workspace:edit')) throw new Error(`插件工具 ${tool.name} 缺少文件删除权限`);
     if (tool.risk === 'write') {
       const mutationPermissions: PluginManifest['permissions'] = expectedApiVersion !== 1
-        ? ['workspace:edit', 'annotations:write', 'artifacts:write', 'artifacts:publish', 'evidence:write', 'research:write', 'worktable:write', 'workbench:write', 'workbench:mount', 'browser:interact', 'generated-apps:publish', 'generated-apps:build', 'toolchains:execute']
+        ? ['workspace:edit', 'annotations:write', 'artifacts:write', 'artifacts:publish', 'evidence:write', 'research:write', 'worktable:write', 'workbench:write', 'workbench:mount', 'browser:interact', 'generated-apps:publish', 'generated-apps:build', 'toolchains:execute', 'bibliography:attachments', 'zotero:write', 'zotero:documents']
         : ['project:write'];
       if (!mutationPermissions.some((permission) => manifest.permissions.includes(permission))) throw new Error(`插件工具 ${tool.name} 缺少写入能力`);
     }
@@ -126,7 +126,7 @@ export function validatePluginDescription(manifest: PluginManifest, description:
   if (workflows.length > 32 || new Set(workflows.map((workflow) => workflow.id)).size !== workflows.length) throw new Error(`插件工作流数量或 ID 无效：${manifest.id}`);
   if (workflows.length > 0 && (expectedApiVersion === 1 || !manifest.permissions.includes('jobs:run'))) throw new Error(`插件工作流需要 Plugin API v2/v3 与 jobs:run：${manifest.id}`);
   for (const workflow of workflows) {
-    if (!/^[a-z0-9][a-z0-9._-]{1,127}$/u.test(workflow.id) || !workflow.title.trim() || !workflow.description.trim()) throw new Error(`插件工作流定义无效：${manifest.id}`);
+    if (!/^[a-z0-9][a-z0-9._:-]{1,127}$/u.test(workflow.id) || !workflow.title.trim() || !workflow.description.trim()) throw new Error(`插件工作流定义无效：${manifest.id}`);
     new AjvConstructor({ allErrors: true, strict: false }).compile(workflow.inputSchema as object);
   }
   if ((manifest.contributes.contextProviders?.length ?? 0) > 0 && !description.hasContext) throw new Error(`插件未导出 manifest 声明的上下文提供器：${manifest.id}`);
@@ -205,6 +205,44 @@ function hashDirectory(root: string): string {
   return hash.digest('hex');
 }
 
+/**
+ * Bundled plugins are hashed from their distributable sources. A workspace
+ * checkout may also contain a package-manager-created node_modules junction;
+ * that junction is required for local execution but is neither shipped nor
+ * part of the plugin's identity.
+ */
+function hashBundledDirectory(root: string): string {
+  const resolvedRoot = resolve(root);
+  const hash = createHash('sha256');
+  let fileCount = 0;
+  let totalBytes = 0;
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(directory, entry.name);
+      const rel = relative(resolvedRoot, path).replaceAll('\\', '/');
+      if (rel.split('/')[0] === 'node_modules' || rel.endsWith('/.tsbuildinfo') || rel === '.tsbuildinfo') continue;
+      validatePortableRelativePath(rel);
+      if (entry.isSymbolicLink()) throw new Error(`bundled 插件不得包含符号链接或目录联接：${rel}`);
+      if (entry.isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!entry.isFile()) throw new Error(`bundled 插件包含不支持的文件类型：${rel}`);
+      const size = statSync(path).size;
+      if (size > MAX_PLUGIN_FILE_BYTES) throw new Error(`bundled 插件单文件超过 128 MB：${rel}`);
+      fileCount += 1;
+      totalBytes += size;
+      if (fileCount > MAX_PLUGIN_FILES) throw new Error(`bundled 插件文件数量超过上限（${MAX_PLUGIN_FILES}）`);
+      if (totalBytes > MAX_PLUGIN_BYTES) throw new Error('bundled 插件大小超过 512 MB');
+      hash.update(rel);
+      hash.update(String(size));
+      hash.update(readFileSync(path));
+    }
+  };
+  visit(resolvedRoot);
+  return hash.digest('hex');
+}
+
 function readBooleanRecord(path: string): Record<string, boolean> {
   const value = readJsonFile<unknown>(path, {});
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -226,6 +264,7 @@ function readSettingsRecord(path: string): Record<string, JsonValue> {
 export class PluginManager {
   readonly #userRoot: string;
   readonly #projectRoot: string;
+  readonly #bundledRoots: string[];
   readonly #projectPath: string;
   readonly #registry: ToolRegistry;
   readonly #projectId: string;
@@ -246,10 +285,11 @@ export class PluginManager {
   #plugins: InstalledPlugin[] = [];
   #hostHandler: PluginHostCallHandler | undefined;
 
-  constructor(options: { userRoot: string; projectRoot: string; projectId: string; registry: ToolRegistry; hostHandler?: PluginHostCallHandler }) {
+  constructor(options: { userRoot: string; projectRoot: string; projectId: string; registry: ToolRegistry; bundledRoots?: string[]; hostHandler?: PluginHostCallHandler }) {
     this.#userRoot = options.userRoot;
     this.#projectPath = options.projectRoot;
     this.#projectRoot = join(options.projectRoot, '.openlab', 'plugins');
+    this.#bundledRoots = [...new Set((options.bundledRoots ?? []).map((root) => resolve(root)))];
     this.#registry = options.registry;
     this.#projectId = options.projectId;
     this.#hostHandler = options.hostHandler;
@@ -273,6 +313,7 @@ export class PluginManager {
     const plugins: InstalledPlugin[] = [];
     this.scan(this.#userRoot, 'user', plugins);
     this.scan(this.#projectRoot, 'project', plugins);
+    for (const root of this.#bundledRoots) this.scanBundled(root, plugins);
     const merged = new Map<string, InstalledPlugin>();
     for (const plugin of plugins) merged.set(plugin.manifest.id, plugin);
     this.#plugins = [...merged.values()];
@@ -476,7 +517,7 @@ export class PluginManager {
     const plugin = this.require(id);
     if (plugin.integrity === 'mismatch') throw new Error(`插件完整性校验失败，请检查来源后显式热重载：${id}`);
     if (this.#processes.has(id)) return;
-    const currentHash = hashDirectory(plugin.root);
+    const currentHash = plugin.scope === 'bundled' ? hashBundledDirectory(plugin.root) : hashDirectory(plugin.root);
     const currentManifest = readPluginManifest(plugin.root);
     if (currentHash !== plugin.sha256 || JSON.stringify(currentManifest) !== JSON.stringify(plugin.manifest)) {
       this.refresh();
@@ -487,7 +528,7 @@ export class PluginManager {
     let disposers: Array<() => void> = [];
     try {
       this.validateDescription(plugin.manifest, description);
-      if (plugin.integrity === 'unlocked') {
+      if (plugin.integrity === 'unlocked' && plugin.scope !== 'bundled') {
         plugin.sha256 = currentHash;
         plugin.integrity = 'verified';
         this.setLock(plugin.scope, id, plugin.sha256);
@@ -591,13 +632,13 @@ export class PluginManager {
       this.#toolDisposers.set(id, candidateDisposers);
       candidate.setCrashHandler((error) => this.handleProcessCrash(id, candidate, error));
       plugin.manifest = manifest;
-      plugin.sha256 = hashDirectory(plugin.root);
+      plugin.sha256 = plugin.scope === 'bundled' ? hashBundledDirectory(plugin.root) : hashDirectory(plugin.root);
       plugin.integrity = 'verified';
       plugin.enabled = true;
       delete plugin.error;
       this.#enabled[id] = true;
       this.persistState();
-      this.setLock(plugin.scope, id, plugin.sha256);
+      if (plugin.scope !== 'bundled') this.setLock(plugin.scope, id, plugin.sha256);
       return;
     }
 
@@ -619,9 +660,9 @@ export class PluginManager {
     this.#toolDisposers.set(id, candidateDisposers);
     candidate.setCrashHandler((error) => this.handleProcessCrash(id, candidate, error));
     plugin.manifest = manifest;
-    plugin.sha256 = hashDirectory(plugin.root);
+    plugin.sha256 = plugin.scope === 'bundled' ? hashBundledDirectory(plugin.root) : hashDirectory(plugin.root);
     plugin.integrity = 'verified';
-    this.setLock(plugin.scope, id, plugin.sha256);
+    if (plugin.scope !== 'bundled') this.setLock(plugin.scope, id, plugin.sha256);
     delete plugin.error;
     await oldProcess.stop();
   }
@@ -725,6 +766,7 @@ export class PluginManager {
 
   async uninstall(id: string): Promise<void> {
     const plugin = this.require(id);
+    if (plugin.scope === 'bundled') throw new Error('首方 bundled 插件随 Sci Workplace 发布，不能从项目中卸载；可在插件设置中停用');
     await this.deactivate(id);
     const allowedRoot = plugin.scope === 'user' ? this.#userRoot : this.#projectRoot;
     if (!isWithin(allowedRoot, plugin.root) || resolve(plugin.root) === resolve(allowedRoot)) throw new Error('拒绝删除未验证的插件路径');
@@ -817,8 +859,8 @@ export class PluginManager {
   private hostCapabilities(manifest: PluginManifest, contextOnly: boolean): PluginManifest['permissions'] {
     if ((manifest.apiVersion ?? 1) === 1) return [];
     const allowed = new Set<PluginManifest['permissions'][number]>(contextOnly
-      ? ['workspace:read', 'resources:read', 'documents:read', 'annotations:read', 'evidence:read', 'research:read', 'plugin-storage', 'worktable:read', 'workbench:read', 'browser:observe']
-      : ['workspace:read', 'workspace:edit', 'resources:read', 'documents:read', 'jobs:run', 'models:run', 'models:invoke', 'annotations:read', 'annotations:write', 'evidence:read', 'evidence:write', 'artifacts:write', 'artifacts:publish', 'research:read', 'research:write', 'plugin-storage', 'ui', 'worktable:read', 'worktable:write', 'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout', 'browser:observe', 'browser:interact', 'generated-apps:publish', 'generated-apps:build', 'toolchains:execute']);
+      ? ['workspace:read', 'resources:read', 'documents:read', 'annotations:read', 'evidence:read', 'research:read', 'plugin-storage', 'worktable:read', 'workbench:read', 'browser:observe', 'bibliography:resolve', 'zotero:read']
+      : ['workspace:read', 'workspace:edit', 'resources:read', 'documents:read', 'jobs:run', 'models:run', 'models:invoke', 'annotations:read', 'annotations:write', 'evidence:read', 'evidence:write', 'artifacts:write', 'artifacts:publish', 'research:read', 'research:write', 'plugin-storage', 'ui', 'worktable:read', 'worktable:write', 'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout', 'browser:observe', 'browser:interact', 'generated-apps:publish', 'generated-apps:build', 'toolchains:execute', 'bibliography:resolve', 'bibliography:attachments', 'zotero:read', 'zotero:write', 'zotero:documents']);
     return manifest.permissions.filter((permission) => allowed.has(permission));
   }
 
@@ -840,6 +882,29 @@ export class PluginManager {
           ...(integrity === 'mismatch' ? { error: 'SHA-256 与安装锁不一致' } : {}),
         });
       } catch { /* invalid plugins remain inactive and are reported during explicit import */ }
+    }
+  }
+
+  private scanBundled(root: string, output: InstalledPlugin[]): void {
+    if (!existsSync(root)) return;
+    const pluginRoots = existsSync(join(root, 'manifest.json'))
+      ? [root]
+      : readdirSync(root, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && existsSync(join(root, entry.name, 'manifest.json')))
+        .map((entry) => join(root, entry.name));
+    for (const pluginRoot of pluginRoots) {
+      try {
+        const manifest = readPluginManifest(pluginRoot);
+        output.push({
+          manifest,
+          root: pluginRoot,
+          scope: 'bundled',
+          enabled: this.#enabled[manifest.id] !== false,
+          trusted: true,
+          sha256: hashBundledDirectory(pluginRoot),
+          integrity: 'verified',
+        });
+      } catch { /* release validation reports broken bundled plugins */ }
     }
   }
 

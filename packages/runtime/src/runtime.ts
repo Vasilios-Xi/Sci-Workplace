@@ -20,11 +20,14 @@ import type {
   ArtifactFileRole,
   ArtifactRevision,
   ArtifactRevisionFile,
+  BibliographicRecordV1,
+  BibliographyResolveRequestV1,
   BootstrapSnapshot,
   BrowserProfileSummary,
   BrowserSessionSummary,
   ChatAttachmentRef,
   ChatSubmissionInput,
+  CitationDocumentPlanV1,
   CollaborationChannel,
   ConversationStartInput,
   ConversationStartResult,
@@ -85,6 +88,8 @@ import type {
   WorkspaceRootSummary,
   WorkspaceAccessMode,
   WorkspaceSearchResult,
+  ZoteroSearchRequestV1,
+  ZoteroSyncPlanRequestV1,
   WorkbenchContribution,
   WorkbenchSlotV1,
   WorkbenchState,
@@ -160,6 +165,9 @@ import { ScientificKernelStore } from './workbench/scientific-kernel-store.js';
 import { ToolchainAdapterService } from './workbench/toolchain-adapter-service.js';
 import { GeneratedAppBlueprintService } from './workbench/generated-app-blueprint-service.js';
 import { PaperReaderService } from './workbench/paper-reader-service.js';
+import { BibliographyService } from './workbench/bibliography-service.js';
+import { CitationDocumentService } from './workbench/citation-document-service.js';
+import { ZoteroHostService } from './workbench/zotero-host-service.js';
 import { runPaperReaderAnalysis, runPaperReaderTranslation } from './workbench/paper-reader-model-adapter.js';
 import { paperReaderPanelHtml } from './workbench/paper-reader-panel.js';
 import { TerminalService, type TerminalDriver, type TerminalSessionRecord } from './worktable/terminal-service.js';
@@ -899,6 +907,9 @@ export class OpenLabRuntime {
   readonly toolchainAdapters: ToolchainAdapterService;
   readonly generatedAppBlueprints: GeneratedAppBlueprintService;
   readonly paperReaders: PaperReaderService;
+  readonly bibliography: BibliographyService;
+  readonly citationDocuments: CitationDocumentService;
+  readonly zotero: ZoteroHostService;
   readonly terminals: TerminalService;
   readonly scm: ScmService;
   readonly pricing: DeepSeekPricingTable;
@@ -1173,6 +1184,44 @@ export class OpenLabRuntime {
         if (this.scientificKernel) this.emitScientificKernel();
       },
     });
+    this.citationDocuments = new CitationDocumentService({
+      resolveRoot: (rootId, intent) => this.resolveWorkbenchRoot(rootId, intent),
+    });
+    let bibliography!: BibliographyService;
+    this.zotero = new ZoteroHostService({
+      documents: this.citationDocuments,
+      attachment: (id) => bibliography.attachment(id),
+      ...(process.env.OPENLAB_ZOTERO_COMPANION_PATH ? { companionPath: process.env.OPENLAB_ZOTERO_COMPANION_PATH } : {}),
+    });
+    bibliography = new BibliographyService({
+      cacheRoot: join(config.projectRoot, '.openlab', 'bibliography-cache'),
+      searchLocal: async (query) => {
+        const items = await this.zotero.search({
+          ...(query.manager === 'zotero' && query.managerKey ? { key: query.managerKey } : {}),
+          ...(query.doi ? { doi: query.doi } : {}),
+          ...(query.pmid ? { pmid: query.pmid } : {}),
+          ...(query.arxivId ? { arxivId: query.arxivId } : {}),
+          ...(query.title ? { title: query.title } : {}),
+          limit: 25,
+        });
+        return items.map((item): BibliographicRecordV1 => ({
+          schemaVersion: 1,
+          canonicalId: item.doi ? `doi:${item.doi.toLocaleLowerCase()}` : item.pmid ? `pmid:${item.pmid}` : item.arxivId ? `arxiv:${item.arxivId.toLocaleLowerCase()}` : `zotero:${item.libraryId}:${item.key}`,
+          itemType: 'journalArticle',
+          title: item.title,
+          creators: item.creators,
+          ...(item.issuedYear ? { issuedYear: item.issuedYear } : {}),
+          ...(item.doi ? { doi: item.doi } : {}),
+          ...(item.pmid ? { pmid: item.pmid } : {}),
+          ...(item.arxivId ? { arxivId: item.arxivId } : {}),
+          ...(item.url ? { url: item.url } : {}),
+          retractionStatus: 'unknown',
+          source: 'zotero',
+          retrievedAt: new Date().toISOString(),
+        }));
+      },
+    });
+    this.bibliography = bibliography;
     this.terminals = new TerminalService({
       projectId: manifest.id,
       events: this.events,
@@ -1193,6 +1242,7 @@ export class OpenLabRuntime {
     this.skills = new SkillManager({ userRoot: this.paths.skills, projectRoot: config.projectRoot, requireApprovalForDiscovered: true });
     this.plugins = new PluginManager({
       userRoot: this.paths.plugins, projectRoot: config.projectRoot, projectId: manifest.id, registry: this.tools,
+      ...(process.env.OPENLAB_FEATURE_CITATION_WORKBENCH_V1 !== '0' && process.env.OPENLAB_BUNDLED_PLUGIN_ROOT ? { bundledRoots: [process.env.OPENLAB_BUNDLED_PLUGIN_ROOT] } : {}),
       hostHandler: async (request) => await this.handlePluginHostCall(request),
     });
     const catalogKey = process.env.SCI_WORKPLACE_PLUGIN_CATALOG_PUBLIC_KEY?.replaceAll('\\n', '\n');
@@ -5002,7 +5052,8 @@ export class OpenLabRuntime {
     this.harnessWorkbenches.replacePluginBlueprints(this.plugins.workbenchBlueprints());
   }
 
-  private isTrustedPluginInstallation(plugin: { manifest: PluginManifest; sha256: string }): boolean {
+  private isTrustedPluginInstallation(plugin: { manifest: PluginManifest; sha256: string; trusted?: boolean }): boolean {
+    if (plugin.trusted === true) return true;
     return this.events.list(`project:${this.project.id}`).some((event) => {
       if (event.kind !== 'plugin.installed' || !isRecord(event.payload) || event.payload.trusted !== true || event.payload.sha256 !== plugin.sha256) return false;
       const manifest = event.payload.manifest;
@@ -5369,6 +5420,100 @@ export class OpenLabRuntime {
         this.requirePluginCapability(request, request.context.capabilities.includes('documents:read') ? 'documents:read' : 'resources:read');
         this.resources.release(String(request.params.handleId ?? ''));
         return true;
+      case 'bibliography.scanDocument': {
+        this.requirePluginCapability(request, 'bibliography:resolve');
+        this.requirePluginCapability(request, 'documents:read');
+        const source = parameter<DocumentRevisionRef>('source');
+        const inspection = this.citationDocuments.scan(source);
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'bibliography.document_scanned', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: [source.sha256], payload: toJson({ format: inspection.format, unitCount: inspection.units.length, warningCount: inspection.warnings.length }),
+        });
+        return inspection;
+      }
+      case 'bibliography.resolve': {
+        this.requirePluginCapability(request, 'bibliography:resolve');
+        const input = parameter<BibliographyResolveRequestV1>('request');
+        const resolutions = await this.bibliography.resolve(input);
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'bibliography.references_resolved', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: resolutions.flatMap((resolution) => resolution.record ? [resolution.record.canonicalId] : []),
+          payload: toJson({ queryCount: input.queries.length, resolved: resolutions.filter((resolution) => resolution.status === 'resolved').length, ambiguous: resolutions.filter((resolution) => resolution.status === 'ambiguous').length, unrecognized: resolutions.filter((resolution) => resolution.status === 'unrecognized').length }),
+        });
+        return resolutions;
+      }
+      case 'bibliography.verifyMetadata': {
+        this.requirePluginCapability(request, 'bibliography:resolve');
+        const record = parameter<BibliographicRecordV1>('record');
+        const verification = await this.bibliography.verifyMetadata(record);
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'bibliography.metadata_verified', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: [record.canonicalId], payload: toJson({ canonicalId: record.canonicalId, status: verification.status, issueCount: verification.issues.length }),
+        });
+        return verification;
+      }
+      case 'bibliography.fetchOpenAccess': {
+        this.requirePluginCapability(request, 'bibliography:attachments');
+        const record = parameter<BibliographicRecordV1>('record');
+        const receipt = await this.bibliography.fetchOpenAccess(record);
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'bibliography.oa_checked', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: [record.canonicalId, ...(receipt.sha256 ? [receipt.sha256] : [])],
+          payload: toJson({ canonicalId: record.canonicalId, status: receipt.status, ...(receipt.sha256 ? { sha256: receipt.sha256 } : {}), ...(receipt.license ? { license: receipt.license } : {}) }),
+        });
+        return receipt;
+      }
+      case 'zotero.status':
+        this.requirePluginCapability(request, 'zotero:read');
+        return await this.zotero.status();
+      case 'zotero.search': {
+        this.requirePluginCapability(request, 'zotero:read');
+        const results = await this.zotero.search(parameter<ZoteroSearchRequestV1>('request'));
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'zotero.library_searched', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          payload: toJson({ resultCount: results.length }),
+        });
+        return results;
+      }
+      case 'zotero.planSync': {
+        this.requirePluginCapability(request, 'zotero:read');
+        const plan = await this.zotero.planSync(parameter<ZoteroSyncPlanRequestV1>('request'));
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'zotero.sync_planned', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: [plan.sourceSha256, plan.operationKey],
+          payload: toJson({ planId: plan.id, collection: plan.target.childName, creates: plan.operations.filter((operation) => operation.action === 'create').length, reuses: plan.operations.filter((operation) => operation.action === 'reuse').length, conflicts: plan.operations.filter((operation) => operation.action === 'conflict').length, attachmentCount: plan.operations.reduce((total, operation) => total + operation.attachmentCount, 0) }),
+        });
+        return plan;
+      }
+      case 'zotero.commitSync': {
+        this.requirePluginCapability(request, 'zotero:write');
+        const receipt = await this.zotero.commitSync(String(request.params.planId ?? ''), request.params.confirmed === true);
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'zotero.sync_committed', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: [receipt.operationKey, ...(receipt.collectionKey ? [receipt.collectionKey] : [])],
+          payload: toJson({ mode: receipt.mode, collectionKey: receipt.collectionKey, created: receipt.items.filter((item) => item.status === 'created').length, reused: receipt.items.filter((item) => item.status === 'reused').length, failed: receipt.items.filter((item) => item.status === 'failed').length }),
+        });
+        return receipt;
+      }
+      case 'zotero.materializeCitationDocument': {
+        this.requirePluginCapability(request, 'zotero:documents');
+        const plan = parameter<CitationDocumentPlanV1>('plan');
+        const receipt = this.zotero.materializeCitationDocument(plan);
+        this.events.append({
+          streamId: `project:${this.project.id}`, kind: 'citation.document_materialized', actor,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          provenanceRefs: [plan.source.sha256, receipt.outputSha256, receipt.operationKey],
+          payload: toJson({ readiness: receipt.readiness, output: receipt.output, appliedCount: receipt.appliedCount, skippedCount: receipt.skippedCount, dynamicFieldCount: receipt.dynamicFieldCount }),
+        });
+        return receipt;
+      }
       case 'jobs.run': {
         this.requirePluginCapability(request, 'jobs:run');
         const spec = parameter<JobSpec>('spec');

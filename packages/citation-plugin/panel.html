@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Citation Workbench</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, "Microsoft YaHei", system-ui, sans-serif; background:#10151d; color:#e8edf4; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 20% 0,#1d3145 0,transparent 38%),#10151d; }
+    button { font:inherit; }
+    .shell { display:flex; flex-direction:column; min-height:100vh; }
+    header { padding:16px 18px 10px; border-bottom:1px solid #2b3746; background:#111923dc; backdrop-filter:blur(12px); }
+    .eyebrow { color:#75c5ba; font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
+    h1 { margin:5px 0 3px; font-size:20px; font-weight:720; }
+    .subtitle { margin:0; color:#9eabb9; font-size:12px; line-height:1.5; }
+    nav { display:flex; gap:5px; padding:10px 12px; overflow:auto; border-bottom:1px solid #263140; }
+    nav button { padding:7px 10px; border:1px solid transparent; border-radius:8px; background:transparent; color:#9eabb9; white-space:nowrap; cursor:pointer; }
+    nav button.active { color:#effffa; border-color:#35655e; background:#193a36; }
+    main { flex:1; padding:14px; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+    .action { padding:8px 12px; border:1px solid #3f5367; border-radius:8px; background:#1a2633; color:#eaf1f8; cursor:pointer; }
+    .action.primary { border-color:#4b8c83; background:#23655d; }
+    .action.danger { border-color:#8d4d56; background:#572b34; }
+    .action:disabled { opacity:.45; cursor:not-allowed; }
+    .notice { margin:0 0 12px; padding:10px 12px; border:1px solid #425267; border-radius:9px; background:#18212c; color:#bfcbd8; font-size:12px; line-height:1.55; }
+    .notice.warning { border-color:#806838; background:#392f1d; color:#f0d998; }
+    .notice.error { border-color:#8d4d56; background:#3e252b; color:#ffbcc6; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(135px,1fr)); gap:8px; }
+    .card { padding:11px; border:1px solid #2e3b4b; border-radius:10px; background:#151e29dd; min-width:0; }
+    .card label { display:block; margin-bottom:5px; color:#8998a9; font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
+    .card strong { display:block; overflow-wrap:anywhere; font-size:15px; }
+    .card small { display:block; margin-top:4px; color:#8e9aaa; overflow-wrap:anywhere; }
+    .section { margin-top:12px; padding:12px; border:1px solid #2c3948; border-radius:10px; background:#141d27c9; }
+    .section h2 { margin:0 0 9px; font-size:13px; }
+    .list { display:flex; flex-direction:column; gap:7px; }
+    .item { padding:9px 10px; border:1px solid #2b3949; border-radius:8px; background:#101821; }
+    .item .top { display:flex; justify-content:space-between; gap:10px; }
+    .item code { color:#7bd2c5; font-size:10px; }
+    .item .status { font-size:10px; font-weight:700; text-transform:uppercase; }
+    .item.applied .status { color:#74d89b; }
+    .item.skipped .status { color:#f0bd6f; }
+    .item p { margin:6px 0 0; color:#b9c5d1; font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+    .empty { padding:28px 12px; text-align:center; color:#8492a2; font-size:12px; }
+    .progress { height:6px; overflow:hidden; border-radius:99px; background:#26313e; }
+    .progress span { display:block; height:100%; background:linear-gradient(90deg,#4b8c83,#73c8bc); transition:width .25s; }
+    .mono { font-family:"Cascadia Code",Consolas,monospace; font-size:10px; overflow-wrap:anywhere; }
+    .view[hidden] { display:none; }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="eyebrow">Submission-grade citations</div>
+    <h1>Citation Workbench</h1>
+    <p class="subtitle">只修改唯一识别、元数据通过、语义支持明确且无撤稿风险的完整引用单元；其余内容原样跳过。</p>
+  </header>
+  <nav id="tabs">
+    <button data-view="overview" class="active">自动化总览</button>
+    <button data-view="applied">已应用</button>
+    <button data-view="skipped">待核对</button>
+    <button data-view="zotero">Zotero 同步</button>
+    <button data-view="outputs">输出</button>
+  </nav>
+  <main>
+    <div class="toolbar">
+      <button id="prepare" class="action">扫描与预览</button>
+      <button id="run" class="action primary" disabled>确认后整批执行</button>
+      <button id="recheck" class="action" disabled>重新检查待核对项</button>
+      <button id="cancel" class="action danger" disabled>取消运行</button>
+    </div>
+    <p id="message" class="notice">正在连接工作台…</p>
+
+    <section id="overview" class="view">
+      <div id="overview-grid" class="grid"></div>
+      <div class="section"><h2>运行状态</h2><div id="run-state"></div></div>
+      <div class="section"><h2>安全边界</h2><div class="list">
+        <div class="item"><p>源文件固定 SHA-256，所有输出另存；插件无裸网络、进程、端口或 Zotero 凭据权限。</p></div>
+        <div class="item"><p>数字引用簇按原子单元处理。模型只能判断支持关系，不能生成作者、卷期、页码或 DOI。</p></div>
+        <div class="item"><p>撤稿、关注声明、元数据冲突、证据不足、Zotero 写入失败均保留原文并进入审计。</p></div>
+      </div></div>
+    </section>
+    <section id="applied" class="view" hidden><div id="applied-list" class="list"></div></section>
+    <section id="skipped" class="view" hidden><div id="skipped-list" class="list"></div></section>
+    <section id="zotero" class="view" hidden><div id="zotero-grid" class="grid"></div><div class="section"><h2>条目回执</h2><div id="zotero-list" class="list"></div></div></section>
+    <section id="outputs" class="view" hidden><div id="output-list" class="list"></div></section>
+  </main>
+</div>
+<script>
+(() => {
+  let port;
+  let token;
+  let sequence = 0;
+  const pending = new Map();
+  let context;
+  let preview;
+  let audit;
+  let activeJob;
+  const $ = (id) => document.getElementById(id);
+  const record = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const number = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
+  const message = (text, tone = '') => { const node = $('message'); node.textContent = text; node.className = `notice ${tone}`.trim(); };
+
+  function rpc(method, params = {}) {
+    if (!port || !token) return Promise.reject(new Error('工作台桥尚未连接'));
+    const id = `citation-${++sequence}`;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      port.postMessage({ id, token, method, params });
+    });
+  }
+
+  function latestAudit(raw) {
+    const revisions = Array.isArray(raw?.revisions) ? [...raw.revisions].sort((a,b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [];
+    const data = record(raw?.artifactData) || {};
+    for (const revision of revisions) {
+      const files = record(data[revision.id]);
+      const candidate = record(files?.['citation-audit.json']);
+      if (candidate) return candidate;
+    }
+  }
+
+  function activeWorkflow(raw) {
+    const jobs = Array.isArray(raw?.jobs) ? raw.jobs : [];
+    return jobs.find((job) => ['queued','running','paused','interrupted'].includes(job.status)) || jobs.sort((a,b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+  }
+
+  function renderCards(node, cards) {
+    node.innerHTML = cards.map(([label, value, detail]) => `<div class="card"><label>${esc(label)}</label><strong>${esc(value)}</strong>${detail ? `<small>${esc(detail)}</small>` : ''}</div>`).join('');
+  }
+
+  function renderDecisions() {
+    const decisions = Array.isArray(audit?.decisions) ? audit.decisions : [];
+    const applied = decisions.filter((item) => item.status === 'applied');
+    const skipped = decisions.filter((item) => item.status !== 'applied');
+    $('applied-list').innerHTML = applied.length ? applied.map((item) => `<div class="item applied"><div class="top"><code>${esc(item.unitId)}</code><span class="status">applied</span></div><p>${esc(item.originalText)} → <strong>${esc(item.displayText)}</strong></p>${item.supportEvidence ? `<p>证据：${esc(item.supportEvidence)}</p>` : ''}</div>`).join('') : '<div class="empty">尚无已应用引用。</div>';
+    $('skipped-list').innerHTML = skipped.length ? skipped.map((item) => `<div class="item skipped"><div class="top"><code>${esc(item.unitId)}</code><span class="status">${esc(item.status)}</span></div><p>${esc(item.reason)}</p><p>原文保留：${esc(item.originalText)}</p></div>`).join('') : '<div class="empty">当前没有待核对引用。</div>';
+    $('recheck').disabled = !preview || skipped.length === 0;
+  }
+
+  function renderZotero() {
+    const receipt = record(audit?.zotero);
+    const status = record(audit?.zoteroStatus) || record(preview?.zotero);
+    const sync = record(preview?.sync);
+    renderCards($('zotero-grid'), [
+      ['Provider', receipt?.mode || status?.mode || '—', status?.version || ''],
+      ['集合', receipt?.collectionName || record(preview?.collection)?.childName || '—', receipt?.collectionKey || '尚未提交'],
+      ['预计新建', number(sync?.creates), `复用 ${number(sync?.reuses)} · 冲突 ${number(sync?.conflicts)}`],
+      ['写入能力', status?.capabilities?.includes?.('write') ? '可写' : '只读 / 离线', status?.setup?.message || ''],
+    ]);
+    const items = Array.isArray(receipt?.items) ? receipt.items : [];
+    $('zotero-list').innerHTML = items.length ? items.map((item) => `<div class="item ${item.status === 'failed' ? 'skipped' : 'applied'}"><div class="top"><code>${esc(item.canonicalId)}</code><span class="status">${esc(item.status)}</span></div><p>${esc(item.itemKey || item.error || '')}</p></div>`).join('') : '<div class="empty">尚无 Zotero 提交回执。</div>';
+  }
+
+  function renderOutputs() {
+    const revisions = Array.isArray(context?.revisions) ? [...context.revisions].sort((a,b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [];
+    const latest = revisions[0];
+    const files = Array.isArray(latest?.files) ? latest.files : [];
+    $('output-list').innerHTML = files.length ? files.map((file) => `<div class="item"><div class="top"><strong>${esc(file.name)}</strong><span class="status">${esc(file.role)}</span></div><p>${esc(file.mediaType || '')}</p><p class="mono">SHA-256 ${esc(file.sha256)} · ${number(file.size)} bytes</p></div>`).join('') : '<div class="empty">运行完成后，这里会显示修订稿、审计 JSON/Markdown、BibTeX、Zotero 回执与 provenance。</div>';
+  }
+
+  function renderOverview() {
+    const source = record(preview?.source) || record(context?.worktable?.inputs?.source);
+    const job = activeJob;
+    renderCards($('overview-grid'), [
+      ['源修订', source?.ref?.path || source?.path || '未选择', preview?.sourceSha256 || source?.sha256 || ''],
+      ['检测引用', number(preview?.detectedUnits ?? audit?.detectedUnits), `身份预检通过 ${number(preview?.identityEligibleUnits)}`],
+      ['目标样式', preview?.styleId || audit?.styleId || '—', preview?.styleFamily || audit?.styleFamily || ''],
+      ['AI 模型', preview?.model || audit?.model || '—', `上限 ${number(preview?.maximumTotalTokens || audit?.maximumTotalTokens)} tokens`],
+      ['预计模型调用', number(preview?.semanticModelCallsMaximum), `预计 ${number(preview?.estimatedTotalTokens)} tokens`],
+      ['投稿状态', audit?.readiness || '尚未运行', audit ? `应用 ${number(audit?.output?.appliedCount)} · 跳过 ${number(audit?.output?.skippedCount)}` : ''],
+    ]);
+    if (job) {
+      const progress = Math.round(Number(job.progress || 0) * 100);
+      $('run-state').innerHTML = `<div class="item"><div class="top"><strong>${esc(job.stage || job.spec?.title || '引用工作流')}</strong><span class="status">${esc(job.status)}</span></div><p>${progress}%</p><div class="progress"><span style="width:${Math.max(0,Math.min(100,progress))}%"></span></div>${job.error ? `<p>${esc(job.error)}</p>` : ''}</div>`;
+    } else $('run-state').innerHTML = '<div class="empty">先执行“扫描与预览”。预览会固定源哈希、模型、token 上限、样式与集合。</div>';
+    $('run').disabled = !preview?.previewToken || ['queued','running'].includes(job?.status);
+    $('cancel').disabled = !job || !['queued','running','paused','interrupted'].includes(job.status);
+  }
+
+  function render() {
+    audit = latestAudit(context);
+    activeJob = activeWorkflow(context);
+    renderOverview();
+    renderDecisions();
+    renderZotero();
+    renderOutputs();
+    if (audit?.readiness === 'partial_review_required') message('运行完成：可识别部分已处理，仍有待核对项；原文均保持不变。', 'warning');
+    else if (audit?.readiness === 'submission_ready') message('运行完成：全部检测引用均通过，输出标记为 submission_ready。');
+    else if (activeJob?.status === 'running' || activeJob?.status === 'queued') message(`正在运行：${activeJob.stage || '等待任务调度'}。`);
+  }
+
+  async function refresh() {
+    try { context = await rpc('context.read'); render(); }
+    catch (error) { message(error.message || String(error), 'error'); }
+  }
+
+  $('tabs').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-view]');
+    if (!button) return;
+    document.querySelectorAll('nav button').forEach((item) => item.classList.toggle('active', item === button));
+    document.querySelectorAll('.view').forEach((view) => { view.hidden = view.id !== button.dataset.view; });
+  });
+  $('prepare').addEventListener('click', async () => {
+    try {
+      $('prepare').disabled = true; message('正在只读扫描并生成写入上限预览…');
+      const result = await rpc('tool.execute', { tool:'citation.prepare', params:{ instanceId: context?.worktable?.instanceId } });
+      preview = record(result?.metadata);
+      message(result?.content || '预览已完成。请核对参数后整批执行。');
+      render();
+    } catch (error) { message(error.message || String(error), 'error'); }
+    finally { $('prepare').disabled = false; }
+  });
+  $('run').addEventListener('click', async () => {
+    try {
+      message('等待本次运行级确认…');
+      const result = await rpc('tool.execute', { tool:'citation.run', params:{ instanceId: context?.worktable?.instanceId, previewToken: preview?.previewToken } });
+      message(result?.content || '工作流已启动。'); preview = undefined; await refresh();
+    } catch (error) { message(error.message || String(error), 'error'); }
+  });
+  $('recheck').addEventListener('click', async () => {
+    try {
+      const retryUnitIds = (Array.isArray(audit?.decisions) ? audit.decisions : []).filter((item) => item.status !== 'applied').map((item) => item.unitId);
+      const result = await rpc('tool.execute', { tool:'citation.recheck', params:{ instanceId: context?.worktable?.instanceId, previewToken: preview?.previewToken, retryUnitIds } });
+      message(result?.content || '重新检查已启动。'); preview = undefined; await refresh();
+    } catch (error) { message(error.message || String(error), 'error'); }
+  });
+  $('cancel').addEventListener('click', async () => {
+    try { await rpc('tool.execute', { tool:'citation.cancel', params:{ jobId: activeJob?.id } }); await refresh(); }
+    catch (error) { message(error.message || String(error), 'error'); }
+  });
+
+  window.addEventListener('message', (event) => {
+    if (event.data?.type !== 'openlab.plugin-panel.connect' || !event.ports?.[0]) return;
+    token = event.data.token; port = event.ports[0];
+    port.onmessage = (reply) => {
+      const request = pending.get(reply.data?.id); if (!request) return;
+      pending.delete(reply.data.id); reply.data.ok ? request.resolve(reply.data.value) : request.reject(new Error(reply.data.error || '工作台调用失败'));
+    };
+    port.start(); void refresh(); setInterval(() => void refresh(), 3000);
+  });
+})();
+</script>
+</body>
+</html>

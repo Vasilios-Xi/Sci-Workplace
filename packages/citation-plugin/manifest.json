@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 4,
+  "apiVersion": 4,
+  "id": "sci.citation-workbench",
+  "name": "Citation Workbench",
+  "version": "1.0.0",
+  "engine": "^0.1.0",
+  "entry": "dist/index.js",
+  "permissions": [
+    "ui",
+    "documents:read",
+    "bibliography:resolve",
+    "bibliography:attachments",
+    "zotero:read",
+    "zotero:write",
+    "zotero:documents",
+    "models:invoke",
+    "jobs:run",
+    "plugin-storage",
+    "artifacts:publish",
+    "workbench:read",
+    "workbench:mount"
+  ],
+  "contributes": {
+    "tools": ["citation.prepare", "citation.run", "citation.recheck", "citation.cancel"],
+    "uiPanels": [
+      {
+        "id": "citation-workbench",
+        "title": "Citation Workbench",
+        "entry": "panel.html",
+        "tools": ["citation.prepare", "citation.run", "citation.recheck", "citation.cancel"]
+      }
+    ],
+    "workflows": [
+      {
+        "id": "sci.citation-workbench:repair",
+        "title": "引用识别、核验与 Zotero 归档",
+        "description": "保守处理可唯一识别且证据充分的引用，跳过其余项目并持续生成审计记录。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "instanceId": { "type": "string" },
+            "source": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "object",
+                  "properties": { "rootId": { "type": "string" }, "path": { "type": "string" } },
+                  "required": ["rootId", "path"],
+                  "additionalProperties": false
+                },
+                "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "size": { "type": "integer", "minimum": 0 },
+                "mediaType": { "type": "string" }
+              },
+              "required": ["ref", "sha256"],
+              "additionalProperties": false
+            },
+            "operationKey": { "type": "string" },
+            "styleId": { "type": "string" },
+            "styleFamily": { "type": "string", "enum": ["numeric", "author-date"] },
+            "model": { "type": "string" },
+            "maximumTotalTokens": { "type": "integer", "minimum": 1000, "maximum": 1000000 },
+            "collectionKey": { "type": "string" },
+            "collectionRoot": { "type": "string" },
+            "collectionChild": { "type": "string" },
+            "retryUnitIds": { "type": "array", "items": { "type": "string" }, "maxItems": 2000 }
+          },
+          "required": ["instanceId", "source", "operationKey", "styleId", "styleFamily", "model", "maximumTotalTokens", "collectionRoot", "collectionChild"],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "workbenchBlueprints": [
+      {
+        "schemaVersion": 1,
+        "id": "sci.citation-workbench:submission-citations",
+        "version": "1.0.0",
+        "title": "论文级引用",
+        "description": "自动核验已有引用、保守跳过争议项，并同步到 Zotero。",
+        "icon": "book-check",
+        "kind": "research",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "object",
+              "properties": {
+                "rootId": { "type": "string" },
+                "path": { "type": "string" },
+                "name": { "type": "string" },
+                "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "size": { "type": "integer", "minimum": 0 },
+                "mediaType": { "type": "string" }
+              },
+              "required": ["rootId", "path", "sha256"],
+              "additionalProperties": false
+            },
+            "style": { "type": "string", "enum": ["auto", "vancouver", "apa-7th-edition", "nature", "science", "cell"] },
+            "model": { "type": "string" },
+            "tokenBudget": { "type": "integer", "enum": [20000, 60000, 120000, 240000] }
+          },
+          "required": ["source"],
+          "additionalProperties": false
+        },
+        "inputUi": {
+          "controls": [
+            { "kind": "file", "field": "source", "label": "论文草稿", "accept": [".docx", ".md", ".markdown", ".tex", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/markdown", "application/x-tex"], "required": true },
+            { "kind": "select", "field": "style", "label": "期刊 / CSL", "options": [
+              { "value": "auto", "label": "自动（Vancouver / APA 7）" },
+              { "value": "vancouver", "label": "Vancouver" },
+              { "value": "apa-7th-edition", "label": "APA 7" },
+              { "value": "nature", "label": "Nature" },
+              { "value": "science", "label": "Science" },
+              { "value": "cell", "label": "Cell" }
+            ] },
+            { "kind": "text", "field": "model", "label": "AI 模型", "placeholder": "留空则使用工作台默认模型" },
+            { "kind": "select", "field": "tokenBudget", "label": "Token 上限", "options": [
+              { "value": 20000, "label": "20k（小稿件）" },
+              { "value": 60000, "label": "60k（默认）" },
+              { "value": 120000, "label": "120k" },
+              { "value": 240000, "label": "240k" }
+            ] }
+          ]
+        },
+        "layout": {
+          "kind": "split",
+          "direction": "horizontal",
+          "ratio": 0.68,
+          "first": { "kind": "pane", "paneId": "control" },
+          "second": { "kind": "pane", "paneId": "outputs" }
+        },
+        "panes": [
+          {
+            "id": "control",
+            "title": "Citation Workbench",
+            "activeTabId": "citation-panel",
+            "tabs": [
+              {
+                "id": "citation-panel",
+                "title": "引用自动化",
+                "content": { "kind": "plugin-panel", "pluginId": "sci.citation-workbench", "panelId": "citation-workbench" },
+                "pinned": true,
+                "openedAt": "1970-01-01T00:00:00.000Z"
+              }
+            ]
+          },
+          {
+            "id": "outputs",
+            "title": "输出",
+            "activeTabId": "output-placeholder",
+            "tabs": [
+              {
+                "id": "output-placeholder",
+                "title": "运行与产物",
+                "content": { "kind": "builtin", "type": "tasks" },
+                "pinned": true,
+                "openedAt": "1970-01-01T00:00:00.000Z"
+              }
+            ]
+          }
+        ],
+        "slots": [
+          { "id": "primary", "role": "primary", "paneId": "control", "title": "引用控制", "accepts": ["plugin-panel"], "autoMount": false },
+          { "id": "source", "role": "source", "paneId": "control", "title": "源文档", "accepts": ["document"], "autoMount": false },
+          { "id": "output", "role": "output", "paneId": "outputs", "title": "审计与修订稿", "accepts": ["artifact"], "autoMount": true }
+        ],
+        "commands": ["citation.prepare", "citation.run", "citation.recheck", "citation.cancel"]
+      }
+    ]
+  }
+}

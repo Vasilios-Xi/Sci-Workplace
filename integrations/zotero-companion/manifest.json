@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Sci Workplace Zotero Companion",
+  "version": "1.0.0",
+  "description": "Restricted loopback bridge for Citation Workbench on Zotero 9.",
+  "author": "Sci Workplace",
+  "applications": {
+    "zotero": {
+      "id": "citation-companion@sciworkplace.local",
+      "update_url": "https://sciworkplace.invalid/zotero-companion-updates.json",
+      "strict_min_version": "7.0",
+      "strict_max_version": "9.0.*"
+    }
+  }
+}

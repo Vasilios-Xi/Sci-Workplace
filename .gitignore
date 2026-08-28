@@ -17,6 +17,7 @@ apps/renderer/playwright-report/
 apps/renderer/test-results/
 apps/desktop/release*/
 artifacts/
+acceptance/
 *.blockmap
 *.exe
 *.msi

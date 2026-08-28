@@ -258,7 +258,8 @@ export function validatePluginManifest(value: unknown, root: string): PluginMani
     'worktable:read', 'worktable:write', 'browser:observe', 'browser:interact', 'generated-apps:publish',
     'documents:read', 'evidence:read', 'evidence:write', 'artifacts:publish',
     'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout',
-    'generated-apps:build', 'toolchains:execute',
+    'generated-apps:build', 'toolchains:execute', 'bibliography:resolve', 'bibliography:attachments',
+    'zotero:read', 'zotero:write', 'zotero:documents',
   ]);
   if (!Array.isArray(manifest.permissions) || manifest.permissions.some((permission) => !allowed.has(permission))) throw new Error('插件权限列表包含未知权限');
   if (new Set(manifest.permissions).size !== manifest.permissions.length) throw new Error('插件权限列表包含重复项');
@@ -269,7 +270,7 @@ export function validatePluginManifest(value: unknown, root: string): PluginMani
   const directV4Permissions = new Set(['project:read', 'project:write', 'process:spawn', 'network', 'settings:write']);
   if (manifest.apiVersion === 4 && manifest.permissions.some((permission) => directV4Permissions.has(permission))) throw new Error('Plugin API v4 禁止直接项目文件、子进程、裸网络或设置写入权限；请使用宿主代理');
   if (manifest.apiVersion === 4 && manifest.permissions.includes('models:run')) throw new Error('Plugin API v4 必须使用 models:invoke 权限');
-  const v4Permissions = new Set(['documents:read', 'evidence:read', 'evidence:write', 'artifacts:publish', 'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout', 'generated-apps:build', 'toolchains:execute']);
+  const v4Permissions = new Set(['documents:read', 'evidence:read', 'evidence:write', 'artifacts:publish', 'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout', 'generated-apps:build', 'toolchains:execute', 'bibliography:resolve', 'bibliography:attachments', 'zotero:read', 'zotero:write', 'zotero:documents']);
   if (manifest.apiVersion !== 4 && manifest.permissions.some((permission) => v4Permissions.has(permission))) throw new Error('Harness 细粒度权限仅支持 Plugin API v4');
   if (typeof manifest.contributes !== 'object' || manifest.contributes === null) throw new Error('插件必须声明 contributes 对象');
   const tools = validateStringList(manifest.contributes.tools, 'contributes.tools');

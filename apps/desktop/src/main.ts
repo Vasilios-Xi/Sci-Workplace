@@ -356,6 +356,13 @@ function spawnRuntime(projectRoot: string, projectFolderSelectedOverride?: boole
         OPENLAB_READER_RUNTIME_ROOT: app.isPackaged
           ? join(process.resourcesPath, 'reader-runtime')
           : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'packages', 'reader-runtime', 'dist', 'reader-worker'),
+        OPENLAB_FEATURE_CITATION_WORKBENCH_V1: process.env.OPENLAB_FEATURE_CITATION_WORKBENCH_V1 ?? '1',
+        OPENLAB_BUNDLED_PLUGIN_ROOT: app.isPackaged
+          ? join(process.resourcesPath, 'bundled-plugins')
+          : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'packages', 'citation-plugin'),
+        OPENLAB_ZOTERO_COMPANION_PATH: app.isPackaged
+          ? join(process.resourcesPath, 'zotero-companion', 'sci-workplace-zotero-companion.xpi')
+          : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'integrations', 'zotero-companion', 'dist', 'sci-workplace-zotero-companion.xpi'),
       },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });

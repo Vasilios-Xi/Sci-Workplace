@@ -794,7 +794,281 @@ export type HarnessPluginPermissionV4 =
   | 'workbench:mount'
   | 'workbench:propose-layout'
   | 'generated-apps:build'
-  | 'toolchains:execute';
+  | 'toolchains:execute'
+  | 'bibliography:resolve'
+  | 'bibliography:attachments'
+  | 'zotero:read'
+  | 'zotero:write'
+  | 'zotero:documents';
+
+export type CitationSourceFormatV1 = 'docx' | 'markdown' | 'tex';
+export type CitationStyleFamilyV1 = 'numeric' | 'author-date';
+export type CitationUnitKindV1 =
+  | 'doi'
+  | 'pmid'
+  | 'arxiv'
+  | 'title'
+  | 'numeric-cluster'
+  | 'author-date'
+  | 'endnote-field'
+  | 'zotero-field'
+  | 'reference-entry'
+  | 'placeholder';
+
+export interface BibliographicCreatorV1 {
+  family: string;
+  given?: string;
+  literal?: string;
+}
+
+export interface CitationIdentifierV1 {
+  manager?: 'endnote' | 'zotero';
+  managerKey?: string;
+  doi?: string;
+  pmid?: string;
+  arxivId?: string;
+  title?: string;
+  year?: number;
+  firstAuthor?: string;
+}
+
+export interface BibliographicRecordV1 {
+  schemaVersion: 1;
+  canonicalId: string;
+  itemType: 'journalArticle' | 'conferencePaper' | 'book' | 'bookSection' | 'preprint' | 'report' | 'thesis' | 'other';
+  title: string;
+  creators: BibliographicCreatorV1[];
+  issuedYear?: number;
+  containerTitle?: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  publisher?: string;
+  doi?: string;
+  pmid?: string;
+  arxivId?: string;
+  url?: string;
+  abstract?: string;
+  language?: string;
+  retractionStatus: 'clear' | 'retracted' | 'expression_of_concern' | 'corrected' | 'unknown';
+  source: 'zotero' | 'crossref' | 'pubmed' | 'datacite' | 'arxiv' | 'publisher';
+  sourceUrl?: string;
+  retrievedAt: string;
+}
+
+export interface CitationDocumentUnitV1 {
+  id: string;
+  part: string;
+  paragraphIndex: number;
+  start: number;
+  end: number;
+  raw: string;
+  context: string;
+  kind: CitationUnitKindV1;
+  referenceOnly: boolean;
+  /** One member for a simple citation; multiple members for an atomic numeric cluster. */
+  identifiers?: CitationIdentifierV1[];
+  numericLabels?: number[];
+}
+
+export interface CitationDocumentInspectionV1 {
+  schemaVersion: 1;
+  source: DocumentRevisionRef;
+  format: CitationSourceFormatV1;
+  detectedStyleFamily: CitationStyleFamilyV1;
+  units: CitationDocumentUnitV1[];
+  warnings: string[];
+}
+
+export interface BibliographyQueryV1 {
+  id: string;
+  raw: string;
+  manager?: 'endnote' | 'zotero';
+  managerKey?: string;
+  title?: string;
+  doi?: string;
+  pmid?: string;
+  arxivId?: string;
+  year?: number;
+  firstAuthor?: string;
+}
+
+export interface BibliographyResolveRequestV1 {
+  queries: BibliographyQueryV1[];
+  maxCandidates?: number;
+}
+
+export interface BibliographyCandidateV1 {
+  record: BibliographicRecordV1;
+  match: 'exact_identifier' | 'exact_title' | 'candidate';
+  score: number;
+}
+
+export interface BibliographyResolutionV1 {
+  queryId: string;
+  status: 'resolved' | 'ambiguous' | 'unrecognized';
+  match: 'exact_identifier' | 'exact_title' | 'none';
+  record?: BibliographicRecordV1;
+  candidates: BibliographyCandidateV1[];
+  issues: string[];
+}
+
+export interface BibliographyVerificationV1 {
+  status: 'verified' | 'conflict' | 'incomplete';
+  record: BibliographicRecordV1;
+  issues: string[];
+  verifiedAt: string;
+}
+
+export interface OaAttachmentReceiptV1 {
+  schemaVersion: 1;
+  status: 'available' | 'unavailable' | 'downloaded' | 'rejected';
+  attachmentId?: string;
+  sourceUrl?: string;
+  license?: string;
+  mediaType?: string;
+  sha256?: string;
+  size?: number;
+  reason?: string;
+}
+
+export interface ZoteroStatusV1 {
+  schemaVersion: 1;
+  available: boolean;
+  version?: string;
+  serverId?: string;
+  mode: 'native-local-api' | 'companion' | 'read-only' | 'unavailable';
+  capabilities: Array<'read' | 'write' | 'collections' | 'attachments' | 'document-fields'>;
+  setup?: { required: boolean; message: string; companionPath?: string };
+}
+
+export interface ZoteroItemV1 {
+  key: string;
+  uri?: string;
+  libraryId: number;
+  title: string;
+  creators: BibliographicCreatorV1[];
+  issuedYear?: number;
+  doi?: string;
+  pmid?: string;
+  arxivId?: string;
+  url?: string;
+}
+
+export interface ZoteroSearchRequestV1 {
+  key?: string;
+  query?: string;
+  doi?: string;
+  pmid?: string;
+  arxivId?: string;
+  title?: string;
+  limit?: number;
+}
+
+export interface ZoteroSyncItemV1 {
+  record: BibliographicRecordV1;
+  attachmentIds?: string[];
+}
+
+export interface ZoteroCollectionTargetV1 {
+  libraryId?: number;
+  rootName: string;
+  childName: string;
+  collectionKey?: string;
+}
+
+export interface ZoteroSyncPlanRequestV1 {
+  schemaVersion: 1;
+  operationKey: string;
+  sourceSha256: string;
+  target: ZoteroCollectionTargetV1;
+  items: ZoteroSyncItemV1[];
+}
+
+export interface ZoteroSyncOperationV1 {
+  canonicalId: string;
+  action: 'create' | 'reuse' | 'conflict';
+  existingItemKey?: string;
+  attachmentCount: number;
+  reason?: string;
+}
+
+export interface ZoteroSyncPlanV1 {
+  schemaVersion: 1;
+  id: string;
+  operationKey: string;
+  sourceSha256: string;
+  target: ZoteroCollectionTargetV1;
+  operations: ZoteroSyncOperationV1[];
+  expiresAt: string;
+}
+
+export interface ZoteroSyncItemReceiptV1 {
+  canonicalId: string;
+  status: 'created' | 'reused' | 'failed';
+  itemKey?: string;
+  itemUri?: string;
+  attachmentKeys?: string[];
+  error?: string;
+}
+
+export interface ZoteroSyncReceiptV1 {
+  schemaVersion: 1;
+  operationKey: string;
+  collectionKey?: string;
+  collectionName: string;
+  items: ZoteroSyncItemReceiptV1[];
+  committedAt: string;
+  mode: ZoteroStatusV1['mode'];
+}
+
+export type CitationDecisionStatusV1 =
+  | 'applied'
+  | 'unrecognized'
+  | 'ambiguous'
+  | 'insufficient_support'
+  | 'contradicted'
+  | 'retracted_or_corrected'
+  | 'sync_failed';
+
+export interface CitationDocumentEditV1 {
+  unitId: string;
+  originalText: string;
+  displayText: string;
+  status: CitationDecisionStatusV1;
+  reason: string;
+  record?: BibliographicRecordV1;
+  records?: BibliographicRecordV1[];
+  zoteroItemKey?: string;
+  zoteroItemUri?: string;
+  zoteroItems?: Array<{ key: string; uri?: string }>;
+  supportEvidence?: string;
+}
+
+export interface CitationDocumentPlanV1 {
+  schemaVersion: 1;
+  operationKey: string;
+  source: DocumentRevisionRef;
+  format: CitationSourceFormatV1;
+  styleId: string;
+  styleFamily: CitationStyleFamilyV1;
+  edits: CitationDocumentEditV1[];
+  bibliographyPolicy: 'dynamic-resolved-with-unresolved-review';
+}
+
+export interface CitationMaterializationReceiptV1 {
+  schemaVersion: 1;
+  operationKey: string;
+  readiness: 'submission_ready' | 'partial_review_required';
+  output: WorkspacePathRef;
+  outputSha256: string;
+  mediaType: string;
+  appliedCount: number;
+  skippedCount: number;
+  dynamicFieldCount: number;
+  bibliographyGenerated: boolean;
+  warnings: string[];
+}
 
 export type PluginApiVersion = 1 | 2 | 3 | 4;
 
