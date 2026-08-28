@@ -90,6 +90,19 @@ async function assertSemanticPalette(page, expectedTheme) {
   assert.deepEqual(applied.colors, semanticPalettes[resolved], `semantic palette mismatch for ${expectedTheme} (${resolved})`);
 }
 
+function assertBundledCitationWorkbench(plugins, phase) {
+  assert.deepEqual(
+    plugins.map((plugin) => plugin.manifest.id).sort(),
+    ['sci.citation-workbench'],
+    `only the bundled Citation Workbench may be loaded ${phase}`,
+  );
+  const citation = plugins[0];
+  assert.equal(citation.enabled, true, `Citation Workbench must be enabled ${phase}`);
+  assert.equal(citation.trusted, true, `Citation Workbench must be host-trusted ${phase}`);
+  assert.equal(citation.integrity, 'verified', `Citation Workbench integrity must be verified ${phase}`);
+  assert.equal(citation.error, undefined, `Citation Workbench must load without errors ${phase}`);
+}
+
 function jsonContent(content) {
   if (typeof content === 'string') return content;
   return JSON.stringify(content ?? '');
@@ -2159,7 +2172,7 @@ try {
   }, 60_000);
 
   const beforeFork = await snapshot(page);
-  assert.equal(beforeFork.plugins.length, 0, 'retired plugins must not be loaded');
+  assertBundledCitationWorkbench(beforeFork.plugins, 'before restart');
   assert.equal(beforeFork.contextPlan.lastModelRun?.usage.cacheHitTokens, 800);
   assert.equal(beforeFork.sessions.find((session) => session.id === beforeFork.activeSessionId)?.model, 'deepseek::deepseek-v4-pro');
 
@@ -2269,7 +2282,7 @@ try {
   assert.equal(restored.tasks.every((task) => task.status === 'completed'), true);
   assert.equal(restored.channels.filter((channel) => channel.kind === 'private').length >= 3, true);
   assert.equal(restored.memorySummaries.find((summary) => summary.agentId === restored.agentDefinitions[0].id)?.pinnedCount, 1);
-  assert.equal(restored.plugins.length, 0, 'retired plugins must remain absent after restart');
+  assertBundledCitationWorkbench(restored.plugins, 'after restart');
   assert.equal(restored.timeline.some((node) => node.content === 'E2E_MULTI_DONE'), true);
   assert.equal(restored.workspace.note, 'E2E session note: keep provenance explicit.');
   assert.equal(restored.workspace.roots.some((root) => root.kind === 'project' && root.displayPath.toLocaleLowerCase() === additionalProjectRoot.toLocaleLowerCase()), true, 'project folder bindings survive an application restart');

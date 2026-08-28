@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "pnpm --filter @openlab/citation-plugin build && pnpm --filter @openlab/runtime build && pnpm build && wait-on http://127.0.0.1:5173 && cross-env OPENLAB_RENDERER_URL=http://127.0.0.1:5173 electron dist/main.js",
     "start": "electron dist/main.js",
-    "package:win": "pnpm --filter @openlab/renderer build && pnpm --filter @openlab/citation-plugin build && pnpm --filter @openlab/runtime build && pnpm --filter @openlab/reader-runtime verify && pnpm build:zotero-companion && pnpm build && electron-builder --win nsis",
+    "package:win": "pnpm --filter @openlab/renderer build && pnpm --filter @openlab/citation-plugin build && pnpm --filter @openlab/runtime build && pnpm --filter @openlab/reader-runtime verify && pnpm -w build:zotero-companion && pnpm build && electron-builder --win nsis",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
