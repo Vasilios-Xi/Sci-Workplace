@@ -116,6 +116,12 @@ function dynamicBibliographyText(path) {
   return [...paragraph.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gu)].map((match) => decodeXmlText(match[1] ?? '')).join('');
 }
 
+function manualTitleReference(raw) {
+  const wrapped = raw.match(/^\s*\d+\s*[（(]\s*(.+?)\s*[）)]\s*$/u)?.[1];
+  const title = (wrapped ?? raw).replace(/[.;,]+$/u, '').trim();
+  return `Title: ${title}`;
+}
+
 const desktop = argument('--desktop', DEFAULT_DESKTOP);
 const outputRoot = argument('--output', DEFAULT_OUTPUT);
 const scanOnly = process.argv.includes('--scan-only');
@@ -271,6 +277,7 @@ if (startingStatus.mode !== 'companion' && startingStatus.mode !== 'native-local
 process.stdout.write(`${JSON.stringify({ event: 'zotero_ready', status: startingStatus, note: 'The first protected call may request one Zotero session approval.' })}\n`);
 
 const results = [];
+let appliedReferenceOverrideCount = 0;
 for (const sample of EXPECTED) {
   const sourceBytes = readFileSync(join(desktop, sample.name));
   const sourceSha256 = digest(sourceBytes);
@@ -283,7 +290,11 @@ for (const sample of EXPECTED) {
     mediaType: DOCX_MEDIA_TYPE,
   };
   activeSample = { ...sample, stem, source };
-  const operationKey = `citation-acceptance-${sourceSha256.slice(0, 40)}`;
+  const preflight = documents.scan(source);
+  const referenceOverrides = preflight.units
+    .filter((unit) => unit.kind === 'title' && unit.recognitionStatus === 'needs_input')
+    .map((unit) => ({ unitId: unit.id, referenceText: manualTitleReference(unit.raw) }));
+  const operationKey = `citation-acceptance-v2-${digest(`${sourceSha256}:${JSON.stringify(referenceOverrides)}`).slice(0, 40)}`;
   const collectionKey = typeof bindings[sample.name]?.collectionKey === 'string' ? bindings[sample.name].collectionKey : undefined;
   const input = {
     instanceId: `citation-acceptance:${stem}`,
@@ -295,7 +306,7 @@ for (const sample of EXPECTED) {
     maximumTotalTokens: 60_000,
     collectionRoot: 'Sci Workplace',
     collectionChild: `${stem} · References`,
-    referenceOverrides: [],
+    referenceOverrides,
     ...(collectionKey ? { collectionKey } : {}),
   };
   const result = await workflow.run(input, {
@@ -342,6 +353,19 @@ for (const sample of EXPECTED) {
   const invalid = audit.decisions.filter((decision) => !['applied', 'unrecognized', 'ambiguous', 'insufficient_support', 'contradicted', 'retracted_or_corrected', 'sync_failed'].includes(decision.status));
   if (invalid.length) throw new Error(`${sample.name} has invalid decision statuses`);
   const finalXml = visibleXml(finalPath);
+  const referenceOverrideResults = [];
+  for (const override of referenceOverrides) {
+    const decision = audit.decisions.find((candidate) => candidate.unitId === override.unitId);
+    if (!decision || decision.suppliedReference !== override.referenceText) {
+      throw new Error(`${sample.name} fixed-format title override was not audited: ${override.unitId}`);
+    }
+    if (decision.status === 'applied') {
+      appliedReferenceOverrideCount += 1;
+    } else if (!finalXml.includes(decision.originalText)) {
+      throw new Error(`${sample.name} changed an unresolved fixed-format title override: ${override.unitId} (${decision.status})`);
+    }
+    referenceOverrideResults.push({ unitId: override.unitId, status: decision.status, reason: decision.reason });
+  }
   for (const placeholder of audit.decisions.filter((decision) => decision.originalText === '[XX]' || decision.originalText === '找参考文献')) {
     if (!finalXml.includes(placeholder.originalText)) throw new Error(`${sample.name} changed placeholder ${placeholder.originalText}`);
   }
@@ -361,6 +385,8 @@ for (const sample of EXPECTED) {
     applied: audit.decisions.filter((decision) => decision.status === 'applied').length,
     skipped: audit.decisions.filter((decision) => decision.status !== 'applied').length,
     decisionCounts: Object.fromEntries([...new Set(audit.decisions.map((decision) => decision.status))].sort().map((status) => [status, audit.decisions.filter((decision) => decision.status === status).length])),
+    referenceOverrides,
+    referenceOverrideResults,
     finalPath,
     finalSha256: digest(finalBytes),
     finalSize: finalBytes.length,
@@ -375,6 +401,10 @@ for (const sample of EXPECTED) {
   writeJson(join(sampleDirectory, 'acceptance-summary.json'), summary);
   results.push(summary);
   process.stdout.write(`${JSON.stringify({ event: 'sample_complete', ...summary })}\n`);
+}
+
+if (appliedReferenceOverrideCount === 0) {
+  throw new Error('No user-supplied fixed-format title completed the deterministic identity, metadata, and Zotero gates');
 }
 
 writeJson(bindingPath, bindings);
