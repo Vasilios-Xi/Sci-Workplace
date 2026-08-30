@@ -49,6 +49,28 @@ interface StoredAttachment {
   size: number;
 }
 
+interface OpenAlexOaLocation {
+  pdfUrl: string;
+  license?: string;
+}
+
+function openAlexOaLocation(value: unknown): OpenAlexOaLocation | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const location = value as Record<string, unknown>;
+  if (typeof location.pdf_url !== 'string' || !location.pdf_url.trim()) return undefined;
+  const license = typeof location.license === 'string' && location.license.trim() ? location.license.trim() : undefined;
+  return { pdfUrl: location.pdf_url.trim(), ...(license ? { license } : {}) };
+}
+
+function isAllowedOaPdfUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' && OA_PDF_HOSTS.has(parsed.hostname.toLocaleLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function decodeXml(value: string): string {
   return value
     .replace(/<[^>]+>/gu, ' ')
@@ -431,10 +453,13 @@ export class BibliographyService {
       try {
         const value = await this.#json(`https://api.openalex.org/works/https://doi.org/${encodeURIComponent(cleanDoi(record.doi))}`) as Record<string, unknown>;
         const openAccess = typeof value.open_access === 'object' && value.open_access !== null ? value.open_access as Record<string, unknown> : {};
-        const location = typeof value.best_oa_location === 'object' && value.best_oa_location !== null ? value.best_oa_location as Record<string, unknown> : {};
-        if (openAccess.is_oa === true && typeof location.pdf_url === 'string') {
-          pdfUrl = location.pdf_url;
-          license = typeof location.license === 'string' ? location.license : undefined;
+        const locations = [value.best_oa_location, ...(Array.isArray(value.locations) ? value.locations : [])]
+          .map(openAlexOaLocation)
+          .filter((location): location is OpenAlexOaLocation => Boolean(location));
+        const location = locations.find((candidate) => isAllowedOaPdfUrl(candidate.pdfUrl)) ?? locations[0];
+        if (openAccess.is_oa === true && location) {
+          pdfUrl = location.pdfUrl;
+          license = location.license;
         }
       } catch (error) {
         return { schemaVersion: 1, status: 'unavailable', reason: error instanceof Error ? error.message : String(error) };

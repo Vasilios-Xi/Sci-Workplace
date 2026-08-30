@@ -438,6 +438,28 @@ describe('Deterministic bibliography and OA gates', () => {
     expect(receipt).toMatchObject({ status: 'rejected', reason: expect.stringMatching(/允许/u) });
   });
 
+  it('uses an allowed repository PDF when the preferred publisher OA location is outside the allowlist', async () => {
+    const root = temporaryDirectory();
+    const calls: string[] = [];
+    const fetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      calls.push(url);
+      if (url.startsWith('https://api.openalex.org/')) return Response.json({
+        open_access: { is_oa: true },
+        best_oa_location: { pdf_url: 'https://publisher.example/article.pdf', license: 'cc-by' },
+        locations: [
+          { pdf_url: 'https://publisher.example/article.pdf', license: 'cc-by' },
+          { pdf_url: 'https://arxiv.org/pdf/2401.00001.pdf', license: 'cc-by' },
+        ],
+      });
+      if (url === 'https://arxiv.org/pdf/2401.00001.pdf') return new Response(Buffer.from('%PDF-1.7\nrepository fixture'), { headers: { 'Content-Type': 'application/pdf' } });
+      throw new Error(`unexpected URL ${url}`);
+    };
+    const receipt = await new BibliographyService({ cacheRoot: join(root, 'cache'), fetch }).fetchOpenAccess(RECORD);
+    expect(receipt).toMatchObject({ status: 'downloaded', sourceUrl: 'https://arxiv.org/pdf/2401.00001.pdf', license: 'cc-by' });
+    expect(calls).not.toContain('https://publisher.example/article.pdf');
+  });
+
   it('enforces the metadata response limit while a body is streaming without Content-Length', async () => {
     const root = temporaryDirectory();
     let cancellations = 0;

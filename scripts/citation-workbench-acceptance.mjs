@@ -28,7 +28,11 @@ const COMPANION_PATH = resolve('integrations/zotero-companion/dist/sci-workplace
 const MODEL_ID = 'acceptance-conservative-evidence-gate-v1';
 const EXPECTED = [
   { name: '22(2).docx', sha256: 'b7167c82b02cf34b8bd9c34bd98c9d60c5ae7ce88eab9633ce5deab2245774c3' },
-  { name: '参考文献测试.docx', sha256: '0d0d5ed4c16a2962f727d7242bc108779c604a5dbe14184ec375f669ac2ff821' },
+  {
+    name: '参考文献测试.docx',
+    sha256: '0d0d5ed4c16a2962f727d7242bc108779c604a5dbe14184ec375f669ac2ff821',
+    requiredAttachmentCanonicalIds: ['doi:10.1038/s41467-026-70835-z'],
+  },
   { name: '测试11(1).docx', sha256: '6a69b4db2aa1aad0ef42710e46399ee94dc92a34fdc58d117461fef8c6229ead' },
 ];
 
@@ -294,7 +298,7 @@ for (const sample of EXPECTED) {
   const referenceOverrides = preflight.units
     .filter((unit) => unit.kind === 'title' && unit.recognitionStatus === 'needs_input')
     .map((unit) => ({ unitId: unit.id, referenceText: manualTitleReference(unit.raw) }));
-  const operationKey = `citation-acceptance-v2-${digest(`${sourceSha256}:${JSON.stringify(referenceOverrides)}`).slice(0, 40)}`;
+  const operationKey = `citation-acceptance-v3-${digest(`${sourceSha256}:${JSON.stringify(referenceOverrides)}`).slice(0, 40)}`;
   const collectionKey = typeof bindings[sample.name]?.collectionKey === 'string' ? bindings[sample.name].collectionKey : undefined;
   const input = {
     instanceId: `citation-acceptance:${stem}`,
@@ -375,6 +379,12 @@ for (const sample of EXPECTED) {
     throw new Error(`${sample.name} dynamic bibliography was not populated by Zotero`);
   }
   const receipt = audit.zotero ?? {};
+  for (const canonicalId of sample.requiredAttachmentCanonicalIds ?? []) {
+    const item = Array.isArray(receipt.items) ? receipt.items.find((candidate) => candidate.canonicalId === canonicalId) : undefined;
+    if (!item || !Array.isArray(item.attachmentKeys) || item.attachmentKeys.length === 0) {
+      throw new Error(`${sample.name} did not import the required verified OA attachment for ${canonicalId}`);
+    }
+  }
   if (receipt.collectionKey) bindings[sample.name] = { collectionKey: receipt.collectionKey, collectionName: receipt.collectionName };
   const summary = {
     sample: sample.name,
