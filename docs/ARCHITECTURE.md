@@ -85,13 +85,15 @@ Renderer 中的主输入框、Agent 编辑器和供应商路由设置必须复�
 
 聊天附件在事件中保存为工作区根、相对路径、大小、媒体类型和 SHA-256，不保存重复的 base64。每次编译上下文都会重新验证文件修订：短文本作为 `untrusted-research-data` 投影；图像只在目标模型声明 `supportsVision` 时读入并转换为供应商原生格式。新附图若选择了非视觉模型会在创建轮次前失败，历史中的旧图片仍可保留为可追溯引用，不会阻止后续纯文本对话。
 
-## 7. 扩展
+## 7. Workbench v1、科研内核与 Plugin API v4
 
-Skills 是指令贡献，不获得权限。MCP stdio/Streamable HTTP 的 tools 与 resources 进入统一 Registry、审计与不可信渲染链。TypeScript 插件由 `PluginProcess` 在独立 Node 进程运行，以 JSON-RPC 2.0/stdio 调用；工具名带长度受限的来源命名空间，避免冲突。插件可贡献 `agentTemplates`；旧 `agentPresets` 只做兼容映射，均须用户确认后才能成为角色。
+Workbench 是项目级应用底座：同一项目可创建多个 `WorkbenchInstanceV1`，每个实例绑定一个 `primaryConversationId`，Agent、模型、工作流与工具链执行统一记为多个 `RunRecordV1`。共享业务状态和设备 UI 状态严格分离；布局拓扑变化走带 base revision 的 `LayoutProposalV1`，Artifact 自动挂载走幂等 `MountIntentV1`。
 
-插件测试在临时副本执行：只接受 registry 依赖说明，移除候选目录中的包管理器配置，禁用 lifecycle scripts，完成严格类型检查、契约测试和进程健康检查。生产安装先在 staging 安装生产依赖并健康检查，再原子切换；失败保留旧版本。
+薄科研内核统一持有不可变文档/Artifact 修订、`EvidenceAnchorV1`、`AnnotationV1`、科研对象与关系、Run 和 ReviewRequest。所有 AI 结论通过锚点回到文档 SHA-256、页、块与可选坐标/图表/公式。插件不能直接访问 SQLite、密钥、任意路径或桌面程序。
 
-插件安装保存最终目录 SHA-256。项目内 `plugin-lock.json` 只是可移植投影，自动启动还必须匹配本机用户数据目录中的项目授权锁；复制项目不会在另一台机器上自动执行插件。外部插件上下文始终标记为不可信。核心只热载插件代理，不热替换生产核心模块。
+正式插件只使用 Plugin API v4 的复数 `workbenches` Host。TypeScript 插件由 `PluginProcess` 在独立 Node 进程运行，通过 JSON-RPC 2.0/stdio 调宿主；v4 运行上下文不暴露旧 `worktable` 或单数 `workbench` 名称。普通表单与审批由宿主渲染，专业面板使用 CSP iframe、一次性 MessagePort 和有界方法。跨插件协作只经过文档、证据、研究对象和 Artifact 接口。
+
+插件测试在临时副本执行，移除候选包管理器控制文件，禁用 lifecycle scripts，完成严格类型检查、契约测试与进程健康检查。生产候选先 staging 再原子切换。未签名包只有开发者模式可运行；策展包必须通过 Ed25519 索引、SHA-256、撤回与清单权限复验。
 
 ## 8. DeepSeek Provider
 

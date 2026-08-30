@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('openlab', {
   startConversation: async (input: import('@openlab/protocol').DesktopConversationStartInput) => await ipcRenderer.invoke('conversation:start', input) as import('@openlab/protocol').DesktopConversationStartResult,
   activateConversation: async (input: import('@openlab/protocol').ConversationActivateInput) => await ipcRenderer.invoke('conversation:activate', input) as import('@openlab/protocol').DesktopConversationActivateResult,
   chooseExtension: async (kind: 'skill' | 'plugin') => await ipcRenderer.invoke('extension:choose', kind) as unknown,
+  choosePluginCatalogIndex: async () => await ipcRenderer.invoke('plugin-catalog:choose-index') as unknown,
+  chooseCuratedPluginPackage: async () => await ipcRenderer.invoke('plugin-catalog:choose-package') as unknown,
   chooseToolchain: async () => await ipcRenderer.invoke('toolchain:choose') as unknown,
   chooseAttachments: async () => await ipcRenderer.invoke('attachment:choose') as unknown,
   importDroppedAttachments: async (files: File[]) => await ipcRenderer.invoke('attachment:import-paths', files.map((file) => webUtils.getPathForFile(file)).filter(Boolean)) as unknown,

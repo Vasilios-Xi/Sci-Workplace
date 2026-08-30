@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import AjvModule, { type ValidateFunction } from 'ajv';
-import type { PluginManifest, WorktableTemplateContribution } from '@openlab/protocol';
+import type { PluginManifest, ToolchainAdapterManifestV1, WorkbenchBlueprintV1, WorktableTemplateContribution } from '@openlab/protocol';
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{1,63}$/u;
 const LOCAL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
@@ -178,12 +178,68 @@ function validateWorktableTemplates(value: unknown, pluginId: string, panelIds: 
   });
 }
 
+function validateWorkbenchBlueprints(value: unknown, pluginId: string, panelIds: ReadonlySet<string>): WorkbenchBlueprintV1[] {
+  if (!Array.isArray(value) || value.length > 16) throw new Error('workbenchBlueprints 必须是最多 16 项的数组');
+  const blueprints = value as unknown[];
+  const templates = blueprints.map((candidate) => {
+    if (!isRecord(candidate) || candidate.schemaVersion !== 1) throw new Error('WorkbenchBlueprint 必须声明 schemaVersion 1');
+    return {
+      id: candidate.id,
+      version: candidate.version,
+      title: candidate.title,
+      description: candidate.description,
+      icon: candidate.icon,
+      pluginId,
+      kind: candidate.kind,
+      inputSchema: candidate.inputSchema,
+      inputUi: candidate.inputUi,
+      layout: candidate.layout,
+      panes: candidate.panes,
+      commands: candidate.commands,
+    };
+  });
+  validateWorktableTemplates(templates, pluginId, panelIds);
+  for (const candidate of blueprints) {
+    const blueprint = candidate as Record<string, unknown>;
+    const panes = new Set((blueprint.panes as Array<{ id: string }>).map((pane) => pane.id));
+    if (!Array.isArray(blueprint.slots) || blueprint.slots.length === 0 || blueprint.slots.length > 32) throw new Error(`WorkbenchBlueprint slots 无效：${String(blueprint.id)}`);
+    const ids = new Set<string>();
+    const roles = new Set<string>();
+    for (const slot of blueprint.slots) {
+      if (!isRecord(slot) || !isNonEmptyString(slot.id) || ids.has(slot.id) || !LOCAL_ID_PATTERN.test(slot.id)) throw new Error(`WorkbenchBlueprint slot ID 无效：${String(blueprint.id)}`);
+      ids.add(slot.id);
+      if (!isNonEmptyString(slot.role) || roles.has(slot.role)) throw new Error(`WorkbenchBlueprint slot role 必须唯一：${String(blueprint.id)}`);
+      roles.add(slot.role);
+      if (!isNonEmptyString(slot.paneId) || !panes.has(slot.paneId) || !isNonEmptyString(slot.title)) throw new Error(`WorkbenchBlueprint slot 引用无效：${String(blueprint.id)}/${slot.id}`);
+      if (!Array.isArray(slot.accepts) || slot.accepts.length === 0 || slot.accepts.some((kind) => !['builtin', 'document', 'artifact', 'plugin-panel', 'generated-app'].includes(String(kind)))) throw new Error(`WorkbenchBlueprint slot accepts 无效：${String(blueprint.id)}/${slot.id}`);
+      if (typeof slot.autoMount !== 'boolean') throw new Error(`WorkbenchBlueprint slot autoMount 无效：${String(blueprint.id)}/${slot.id}`);
+    }
+  }
+  return structuredClone(blueprints) as WorkbenchBlueprintV1[];
+}
+
+function validateToolchainAdapters(value: unknown, pluginId: string): ToolchainAdapterManifestV1[] {
+  if (!Array.isArray(value) || value.length > 8) throw new Error('toolchainAdapters 必须是最多 8 项的数组');
+  const ids = new Set<string>();
+  for (const adapter of value) {
+    if (!isRecord(adapter) || adapter.schemaVersion !== 1 || !isNonEmptyString(adapter.id) || !adapter.id.startsWith(`${pluginId}:`) || ids.has(adapter.id)) throw new Error('工具链适配器 ID 必须唯一并使用插件命名空间');
+    ids.add(adapter.id);
+    if (!isNonEmptyString(adapter.version) || !VERSION_PATTERN.test(adapter.version) || !isNonEmptyString(adapter.title)) throw new Error(`工具链适配器元数据无效：${adapter.id}`);
+    if (!Array.isArray(adapter.platforms) || adapter.platforms.length !== 1 || adapter.platforms[0] !== 'win32') throw new Error(`v1 工具链适配器仅支持 win32：${adapter.id}`);
+    validateStringList(adapter.executableNames, `toolchainAdapters.${adapter.id}.executableNames`);
+    validateStringList(adapter.versionArgs, `toolchainAdapters.${adapter.id}.versionArgs`);
+    if (!Array.isArray(adapter.operations) || adapter.operations.length === 0 || adapter.operations.some((operation) => !isRecord(operation) || !isNonEmptyString(operation.id) || !isNonEmptyString(operation.title) || !isRecord(operation.inputSchema) || !Array.isArray(operation.outputs) || typeof operation.requiresConfirmation !== 'boolean')) throw new Error(`工具链适配器 operations 无效：${adapter.id}`);
+  }
+  return structuredClone(value) as ToolchainAdapterManifestV1[];
+}
+
 export function validatePluginManifest(value: unknown, root: string): PluginManifest {
   if (typeof value !== 'object' || value === null) throw new Error('manifest.json 必须是对象');
   const manifest = value as Partial<PluginManifest>;
-  if (manifest.schemaVersion !== 1 && manifest.schemaVersion !== 2 && manifest.schemaVersion !== 3) throw new Error('仅支持 plugin manifest schemaVersion 1、2 或 3');
+  if (manifest.schemaVersion !== 1 && manifest.schemaVersion !== 2 && manifest.schemaVersion !== 3 && manifest.schemaVersion !== 4) throw new Error('仅支持 plugin manifest schemaVersion 1、2、3 或 4');
   if (manifest.schemaVersion === 2 && manifest.apiVersion !== 2) throw new Error('plugin manifest schemaVersion 2 必须声明 apiVersion 2');
   if (manifest.schemaVersion === 3 && manifest.apiVersion !== 3) throw new Error('plugin manifest schemaVersion 3 必须声明 apiVersion 3');
+  if (manifest.schemaVersion === 4 && manifest.apiVersion !== 4) throw new Error('plugin manifest schemaVersion 4 必须声明 apiVersion 4');
   if (manifest.schemaVersion === 1 && manifest.apiVersion !== undefined && manifest.apiVersion !== 1) throw new Error('旧 manifest 只能使用 Plugin API v1');
   if (typeof manifest.id !== 'string' || !ID_PATTERN.test(manifest.id)) throw new Error('插件 ID 必须是 2–64 位小写字母、数字、点、下划线或连字符');
   if (typeof manifest.name !== 'string' || !manifest.name.trim()) throw new Error('插件名称不能为空');
@@ -200,11 +256,21 @@ export function validatePluginManifest(value: unknown, root: string): PluginMani
     'workspace:read', 'workspace:edit', 'resources:read', 'jobs:run', 'annotations:read', 'annotations:write',
     'models:run', 'models:invoke', 'artifacts:write', 'research:read', 'research:write', 'plugin-storage',
     'worktable:read', 'worktable:write', 'browser:observe', 'browser:interact', 'generated-apps:publish',
+    'documents:read', 'evidence:read', 'evidence:write', 'artifacts:publish',
+    'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout',
+    'generated-apps:build', 'toolchains:execute',
   ]);
   if (!Array.isArray(manifest.permissions) || manifest.permissions.some((permission) => !allowed.has(permission))) throw new Error('插件权限列表包含未知权限');
   if (new Set(manifest.permissions).size !== manifest.permissions.length) throw new Error('插件权限列表包含重复项');
   const v3Permissions = new Set(['worktable:read', 'worktable:write', 'browser:observe', 'browser:interact', 'generated-apps:publish']);
-  if (manifest.apiVersion !== 3 && manifest.permissions.some((permission) => v3Permissions.has(permission))) throw new Error('工作台、浏览器与生成应用权限仅支持 Plugin API v3');
+  if (![3, 4].includes(manifest.apiVersion ?? 0) && manifest.permissions.some((permission) => v3Permissions.has(permission))) throw new Error('旧工作台、浏览器与生成应用权限仅支持 Plugin API v3 或 v4');
+  const removedV4Permissions = new Set(['worktable:read', 'worktable:write', 'generated-apps:publish']);
+  if (manifest.apiVersion === 4 && manifest.permissions.some((permission) => removedV4Permissions.has(permission))) throw new Error('Plugin API v4 必须使用 workbench:* 与 generated-apps:build 权限');
+  const directV4Permissions = new Set(['project:read', 'project:write', 'process:spawn', 'network', 'settings:write']);
+  if (manifest.apiVersion === 4 && manifest.permissions.some((permission) => directV4Permissions.has(permission))) throw new Error('Plugin API v4 禁止直接项目文件、子进程、裸网络或设置写入权限；请使用宿主代理');
+  if (manifest.apiVersion === 4 && manifest.permissions.includes('models:run')) throw new Error('Plugin API v4 必须使用 models:invoke 权限');
+  const v4Permissions = new Set(['documents:read', 'evidence:read', 'evidence:write', 'artifacts:publish', 'workbench:read', 'workbench:write', 'workbench:mount', 'workbench:propose-layout', 'generated-apps:build', 'toolchains:execute']);
+  if (manifest.apiVersion !== 4 && manifest.permissions.some((permission) => v4Permissions.has(permission))) throw new Error('Harness 细粒度权限仅支持 Plugin API v4');
   if (typeof manifest.contributes !== 'object' || manifest.contributes === null) throw new Error('插件必须声明 contributes 对象');
   const tools = validateStringList(manifest.contributes.tools, 'contributes.tools');
   const contextProviders = validateStringList(manifest.contributes.contextProviders, 'contributes.contextProviders');
@@ -282,9 +348,50 @@ export function validatePluginManifest(value: unknown, root: string): PluginMani
     if (!manifest.permissions.includes('ui')) throw new Error('声明工作台模板的插件必须申请 ui 权限');
     validatedWorktableTemplates = validateWorktableTemplates(worktableTemplates, manifest.id, new Set(panels?.map((panel) => panel.id) ?? []));
   }
+  const workbenchBlueprints = manifest.contributes.workbenchBlueprints;
+  let validatedWorkbenchBlueprints: WorkbenchBlueprintV1[] | undefined;
+  if (workbenchBlueprints !== undefined) {
+    if (manifest.schemaVersion !== 4 || manifest.apiVersion !== 4) throw new Error('workbenchBlueprints contribution 仅支持 Plugin API v4');
+    if (!manifest.permissions.includes('workbench:read')) throw new Error('声明 WorkbenchBlueprint 的插件必须申请 workbench:read 权限');
+    validatedWorkbenchBlueprints = validateWorkbenchBlueprints(workbenchBlueprints, manifest.id, new Set(panels?.map((panel) => panel.id) ?? []));
+  }
+  const workflows = manifest.contributes.workflows;
+  if (workflows !== undefined) {
+    if (manifest.apiVersion !== 4 || !Array.isArray(workflows) || workflows.length > 32) throw new Error('workflows contribution 仅支持 Plugin API v4 且最多 32 项');
+    const ids = new Set<string>();
+    for (const workflow of workflows) {
+      if (!workflow || !isNonEmptyString(workflow.id) || !workflow.id.startsWith(`${manifest.id}:`) || ids.has(workflow.id) || !isNonEmptyString(workflow.title) || !isNonEmptyString(workflow.description) || !isRecord(workflow.inputSchema)) throw new Error('插件 workflow 必须完整、唯一并使用插件命名空间');
+      ids.add(workflow.id);
+    }
+  }
+  const surfaces = manifest.contributes.surfaces;
+  if (surfaces !== undefined) {
+    if (manifest.apiVersion !== 4 || !manifest.permissions.includes('ui') || !Array.isArray(surfaces) || surfaces.length > 16) throw new Error('surfaces contribution 需要 Plugin API v4 与 ui 权限');
+    const ids = new Set<string>();
+    for (const surface of surfaces) {
+      if (!surface || !isNonEmptyString(surface.id) || !surface.id.startsWith(`${manifest.id}:`) || ids.has(surface.id) || !isNonEmptyString(surface.title) || !['pdf-reader', 'knowledge-graph', 'drawing-canvas', 'custom'].includes(surface.kind) || !Array.isArray(surface.allowedHostCapabilities)) throw new Error('插件 surface 无效');
+      ids.add(surface.id);
+      const surfaceEntry = resolve(root, surface.entry);
+      const surfaceRelative = relative(resolve(root), surfaceEntry);
+      if (!isNonEmptyString(surface.entry) || isAbsolute(surface.entry) || surfaceRelative.startsWith('..') || isAbsolute(surfaceRelative) || !existsSync(surfaceEntry)) throw new Error(`插件 surface 入口不存在或越过插件目录：${surface.entry}`);
+    }
+  }
+  const artifactRenderers = manifest.contributes.artifactRenderers;
+  if (artifactRenderers !== undefined) {
+    if (manifest.apiVersion !== 4 || !manifest.permissions.includes('ui') || !Array.isArray(artifactRenderers) || artifactRenderers.length > 16) throw new Error('artifactRenderers contribution 需要 Plugin API v4 与 ui 权限');
+    for (const renderer of artifactRenderers) {
+      if (!renderer || !isNonEmptyString(renderer.id) || !renderer.id.startsWith(`${manifest.id}:`) || !Array.isArray(renderer.artifactKinds) || renderer.artifactKinds.length === 0 || !isNonEmptyString(renderer.entry)) throw new Error('插件 Artifact renderer 无效');
+      const rendererEntry = resolve(root, renderer.entry);
+      const rendererRelative = relative(resolve(root), rendererEntry);
+      if (isAbsolute(renderer.entry) || rendererRelative.startsWith('..') || isAbsolute(rendererRelative) || !existsSync(rendererEntry)) throw new Error(`Artifact renderer 入口不存在或越过插件目录：${renderer.entry}`);
+    }
+  }
+  const toolchainAdapters = manifest.contributes.toolchainAdapters;
+  const validatedToolchainAdapters = toolchainAdapters === undefined ? undefined : validateToolchainAdapters(toolchainAdapters, manifest.id);
+  if (validatedToolchainAdapters && (manifest.apiVersion !== 4 || !manifest.permissions.includes('toolchains:execute'))) throw new Error('toolchainAdapters contribution 需要 Plugin API v4 与 toolchains:execute 权限');
   const researchObjectSchemas = manifest.contributes.researchObjectSchemas;
   if (researchObjectSchemas !== undefined) {
-    if (![2, 3].includes(manifest.schemaVersion) || ![2, 3].includes(manifest.apiVersion ?? 0)) throw new Error('researchObjectSchemas 仅支持 Plugin API v2 或 v3');
+    if (![2, 3, 4].includes(manifest.schemaVersion) || ![2, 3, 4].includes(manifest.apiVersion ?? 0)) throw new Error('researchObjectSchemas 仅支持 Plugin API v2、v3 或 v4');
     if (!Array.isArray(researchObjectSchemas) || researchObjectSchemas.length > 64) throw new Error('researchObjectSchemas 必须是最多 64 项的数组');
     for (const schema of researchObjectSchemas) {
       if (!schema || typeof schema.type !== 'string' || !schema.type.startsWith(`${manifest.id}:`) || !objectTypes.includes(schema.type)) throw new Error('科研对象 schema 必须引用已声明的命名空间类型');
@@ -312,6 +419,11 @@ export function validatePluginManifest(value: unknown, root: string): PluginMani
       ...(panels ? { uiPanels: panels.map((panel) => ({ id: panel.id, title: panel.title, entry: panel.entry, tools: [...(panel.tools ?? [])] })) } : {}),
       ...(workbenches ? { workbenches: structuredClone(workbenches) } : {}),
       ...(validatedWorktableTemplates ? { worktableTemplates: validatedWorktableTemplates } : {}),
+      ...(validatedWorkbenchBlueprints ? { workbenchBlueprints: validatedWorkbenchBlueprints } : {}),
+      ...(workflows ? { workflows: structuredClone(workflows) } : {}),
+      ...(surfaces ? { surfaces: structuredClone(surfaces) } : {}),
+      ...(artifactRenderers ? { artifactRenderers: structuredClone(artifactRenderers) } : {}),
+      ...(validatedToolchainAdapters ? { toolchainAdapters: validatedToolchainAdapters } : {}),
       ...(researchObjectSchemas ? { researchObjectSchemas: structuredClone(researchObjectSchemas) } : {}),
     },
   } as PluginManifest;

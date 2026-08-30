@@ -287,21 +287,22 @@ export async function runPluginContract(root: string, manifest: PluginManifest, 
   const compiledRunner = physicalAsarPath(fileURLToPath(new URL('./plugin-contract-runner.js', import.meta.url)));
   const runner = existsSync(compiledRunner) ? compiledRunner : physicalAsarPath(fileURLToPath(new URL('./plugin-contract-runner.ts', import.meta.url)));
   const toolHome = join(resolvedRoot, '.openlab-contract');
+  const allowLegacyDirectCapabilities = (manifest.apiVersion ?? 1) !== 4;
   mkdirSync(toolHome, { recursive: true });
   atomicWriteText(join(toolHome, 'npmrc'), '');
   try {
     const output = await runBoundedCommand({
       label: '插件契约测试', cwd: resolvedRoot, ...(signal ? { signal } : {}), timeoutMs: 30_000, memoryMb: 768, cpuMs: 30_000,
-      activeProcesses: manifest.permissions.includes('process:spawn') ? 8 : 2,
+      activeProcesses: allowLegacyDirectCapabilities && manifest.permissions.includes('process:spawn') ? 8 : 2,
       env: {
         ...minimalEnvironment(toolHome),
-        OPENLAB_PLUGIN_NETWORK: manifest.permissions.includes('network') ? '1' : '0',
+        OPENLAB_PLUGIN_NETWORK: allowLegacyDirectCapabilities && manifest.permissions.includes('network') ? '1' : '0',
       },
       stdin: 'START\n',
       args: [
         '--experimental-transform-types', '--permission',
         `--allow-fs-read=${resolvedRoot}`, `--allow-fs-read=${dirname(runner)}`, `--allow-fs-write=${resolvedRoot}`,
-        ...(manifest.permissions.includes('process:spawn') ? ['--allow-child-process'] : []),
+        ...(allowLegacyDirectCapabilities && manifest.permissions.includes('process:spawn') ? ['--allow-child-process'] : []),
         runner, resolvedRoot, contract,
       ],
     });

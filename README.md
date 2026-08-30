@@ -1,50 +1,43 @@
 # Sci Workplace
 
-Sci Workplace 是面向科研工作的本地优先、多 Agent 桌面 Harness。当前仓库保存对话端本体的可复现开发快照：以科研对话为主入口，统一管理 Agent、模型、上下文、工具审批、项目文件与本地事件记录。
+Sci Workplace 是 Windows 本地优先的科研 Harness。它把对话、可拆分专业画布、可追溯科研对象和受控外部工具链放在同一个工作台底座中，供论文精读、投稿引用、科研绘图等插件复用。
 
-> 当前阶段：对话端可运行；“工作台”仅保留导航入口和占位页。旧工作台界面、旧内置插件、安装包、截图、缓存与本机数据均不属于本仓库。后续工作台与插件体系会重新设计。
+当前 `0.1.0` 实现的是 Workbench v1：一个科研项目可以创建多个工作台实例，每个实例绑定一个主 Agent 对话，并记录多个 Agent、模型、工作流与工具链 `Run`。原始项目文件不会因工作台状态重置、插件测试或产物挂载而被修改。
 
-## 当前能力
+## 已实现能力
 
-- 对话与会话：流式输出、推理过程、Markdown、引用、分支、重新生成、多选和会话级草稿恢复。
-- 多 Agent：持久 Agent、头像、主管与会话成员、`@Agent` 委派、工具能力快照、暂停/恢复和主管收敛。
-- 工具与审批：文件读取、搜索、diff 写入/删除、受控终端、审批卡、撤销、科研对象与 Artifact 溯源。
-- 项目与工作区：项目创建/切换、会话延迟创建、项目文件夹、授权目录、对话文件和上下文引用。
-- 模型接入：DeepSeek、OpenAI-compatible、本地模型服务以及只读的 Codex App Server 对话桥接。
-- 扩展基础：Skills 与 MCP 仍由 Harness 管理；旧插件前端和旧工作台不再随当前产品启用。
-- 桌面安全：Electron Renderer sandbox、`contextIsolation`、严格 CSP、无 Node integration、localhost 临时令牌和 Windows 安全存储。
-- 界面：ChatGPT/Codex 与 HanaAgent 交互习惯启发下的独立实现，支持多套明暗主题、侧栏动画和窄窗口抽屉。
+- 工作台壳层：左侧项目/实例抽屉、中间可拆分画布、右侧绑定对话；Agent 默认收起为方形箭头，宽屏挤压画布、窄屏覆盖。
+- 共享与设备状态分离：实例、任务、布局提案、挂载和审批进入事件日志；窗格比例、活动标签、抽屉宽度与折叠状态仅保存在本机设备状态。
+- 薄科研内核：不可变文档/Artifact 修订、`EvidenceAnchorV1`、批注、研究对象/关系、Run、ReviewRequest、模型/文件/工具链代理。
+- Plugin API v4：`HarnessPluginManifestV4`、`WorkbenchBlueprintV1`、角色槽位、幂等 `MountIntentV1`、需确认的 `LayoutProposalV1`、专业沙箱面板和工具链适配器。
+- 论文精读样板：主文/SI、确认前离线解析与精确 token/调用量预览、一次确认后的自动全文处理、58/42 原文—精读布局、逐段双语、术语冻结、来源约束问答、双向证据定位、证据抽屉、8→4→2→1 自适应拆批、跨重启检查点、局部重跑及 Markdown/JSON 导出。扫描件会明确拒绝，v1 不含 OCR。
+- 提示词生成应用：提示词 → 蓝图 → 布局/能力预览 → 确认 → 构建检查 → CSP 沙箱预览 → 接受并挂载；生成版本不可变、默认无网络和文件能力。
+- 策展插件目录：Ed25519 签名索引、SHA-256 包校验、递增 sequence、撤回、可信离线缓存和失败回滚。未签名目录/ZIP 仅在显式开发者模式下运行。
+- 外部工具链代理：发现、版本探测、用户授权、隔离暂存、日志、取消和产物回收；内置无第三方依赖模拟适配器用于验证未来 Origin/C4D 契约。
+- 对话与多 Agent：持久会话、模型路由、流式输出、工具审批、分支/恢复、任务、频道、上下文编译、项目文件与授权目录。
 
-## 当前边界
-
-- 工作台入口保留，但内容区是待重建占位页。
-- 不打包旧工作台插件，也不把本地安装的插件上传到仓库。
-- Runtime 中仍保留部分旧工作台和 Plugin API 的兼容类型/服务，以避免一次性破坏事件、数据库和通信契约；这些兼容层不代表当前 UI 已开放对应能力。
-- 当前是 Windows x64、中文优先、单用户本地版本；没有账号、云同步、遥测、在线插件市场或公开更新服务。
-
-详细进度、已完成项目和下一阶段计划见 [开发进度](docs/DEVELOPMENT_STATUS.md)。
-
-## 架构
+## 架构概览
 
 ```text
 Electron Main
-  ├─ BrowserWindow / safeStorage / native dialogs
-  ├─ Local Runtime child process (127.0.0.1 + ephemeral token)
-  │    ├─ scoped microkernel / event store
-  │    ├─ context compiler / agent loop / model providers
-  │    ├─ approvals / core tools / project workspace
-  │    └─ Skills / MCP / dormant compatibility services
-  └─ React Renderer (sandboxed, no Node.js)
-       ├─ chat shell / session sidebar / timeline
-       ├─ composer / overlays / approvals
-       └─ workspace side panel / worktable placeholder
+  ├─ BrowserWindow / safeStorage / 本机文件选择器 / 设备 UI 状态
+  ├─ Runtime (127.0.0.1 随机端口 + 临时 Bearer token)
+  │   ├─ SQLite WAL 事件日志与投影
+  │   ├─ Workbench v1 + 薄科研内核
+  │   ├─ Agent / 模型 / 审批 / Workspace 文件代理
+  │   ├─ Plugin API v4 隔离进程与沙箱桥
+  │   ├─ 论文精读 / 生成应用 / 策展市场
+  │   └─ Job / Toolchain Adapter 代理
+  └─ React Renderer（sandbox、无 Node.js）
+      ├─ 对话与控制室
+      └─ 工作台抽屉 / 布局树 / 专业插件面板
 ```
 
-详细设计见 [架构说明](docs/ARCHITECTURE.md)，威胁模型见 [安全说明](docs/SECURITY.md)。
+协议事实源位于 `packages/protocol`，插件 SDK 位于 `packages/plugin-sdk`，Workbench 与科研服务位于 `packages/runtime/src/workbench`。详细说明见 [Workbench v1](docs/WORKBENCH_V1.md)、[架构](docs/ARCHITECTURE.md)、[Plugin API v4](docs/PLUGIN_API_CONTRACT.md) 与 [安全模型](docs/SECURITY.md)。
 
 ## 本地开发
 
-要求：Windows、Node.js 24、pnpm 11。
+要求：Windows x64、Node.js 24、pnpm 11。
 
 ```powershell
 pnpm install
@@ -52,41 +45,33 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm test:e2e:built
+```
+
+开发启动：
+
+```powershell
 pnpm dev
 ```
 
-生成 Windows 安装包：
+生成并验收 Windows 包：
 
 ```powershell
 pnpm --filter @openlab/desktop package:win
 pnpm test:e2e:packaged
 ```
 
-安装产物写入 `apps/desktop/release/`，文件名为 `Sci-Workplace-<version>-windows-<arch>.exe`。构建产物不提交到 Git。
+安装器写入 `apps/desktop/release/Sci-Workplace-<version>-windows-<arch>.exe`。构建、离线 Reader Runtime、截图、本机数据库、密钥、插件缓存和用户项目数据均不提交 Git。
 
-## 工程结构
+需要重新建立应用自管状态时，先关闭应用，再运行 `powershell -File scripts/reset-app-state.ps1`。脚本只允许操作 `%APPDATA%/SciWorkplace`，会先把完整目录原子移动到带时间戳的备份、逐文件复验 SHA-256，再创建空状态根；凭据保持原加密字节，绝不遍历外部项目目录。可先加 `-WhatIf` 查看目标。
 
-```text
-apps/
-  desktop/       Electron Main、preload 与 Windows 打包
-  renderer/      React 对话端界面
-packages/
-  protocol/      进程无关的通信与数据契约
-  kernel/        作用域服务、事件与可逆副作用
-  runtime/       事件库、模型、Agent、工具与项目服务
-  plugin-sdk/    暂存的旧扩展兼容契约（当前 UI 不启用）
-  reader-runtime/旧文档读取兼容运行时（当前 UI 不启用）
-docs/            架构、安全、事件与开发记录
-```
+## 插件开发
 
-## 兼容与数据
+正式插件必须声明 `schemaVersion: 4`、`apiVersion: 4`。可在对话中调用 `scaffold_plugin` 生成项目私有模板，或复制 [v4 模板](templates/plugin-v4/README.md)。插件只能通过声明后的宿主代理访问 Workspace、文档、证据、Artifact、Workbench、模型与工具链；v4 代码中不存在旧 `worktable`/单数 `workbench` Host 名称。
 
-产品可见名称已改为 **Sci Workplace**。为保护已有本机数据，当前版本继续读取旧的 `%APPDATA%\OpenLab` 数据目录，并暂时保留 `OPENLAB_*` 环境变量、`.openlab` 项目元数据与 `@openlab/*` 内部包名。它们是迁移兼容标识，不是旧产品名称仍在对外展示。
+策展目录贡献流程和签名发布见 [插件市场](docs/PLUGIN_MARKETPLACE.md)。本地未签名插件要求在“设置 → 安全”显式开启开发者模式，关闭后会立即停用。
 
-模型凭据由 Electron `safeStorage`/Windows DPAPI 加密，不进入 Git、SQLite 事件、日志或项目目录。真实密钥只通过本机设置、环境变量或 GitHub Actions Secret 提供。
+## 产品边界
 
-## 安全与发布
+首版中文优先、Windows 本地单用户。不包含真实云同步、实时团队协作、公共自助发布后台、付费系统、投稿引用插件、真实 Origin/C4D 适配器、多论文综合或扫描 PDF OCR。事件、稳定身份、actor/device/revision/idempotency 与 `owner/editor/reviewer/viewer` 数据结构已为未来同步和协作预留。
 
-外部文件、网页与 MCP 资源均作为不可信资料处理，不能提升为系统或用户指令。写入、终端、删除、联网、工作区外访问与扩展安装遵循统一审批策略。正式分发前还需要 Authenticode 签名和干净 Windows 环境验收。
-
-本仓库使用私有、保留所有权的源码许可。Copyright © 2026 Vasilios-Xi。见 [LICENSE](LICENSE)。
+模型凭据由 Electron `safeStorage`/Windows DPAPI 加密，不进入 Git、SQLite 事件、日志、插件或项目目录。源码使用仓库内许可，见 [LICENSE](LICENSE)。

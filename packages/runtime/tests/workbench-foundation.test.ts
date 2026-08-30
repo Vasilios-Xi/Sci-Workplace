@@ -3,9 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { DocumentRevisionRef, PluginManifest } from '@openlab/protocol';
+import type { DocumentRevisionRef } from '@openlab/protocol';
 import { OpenLabRuntime } from '../src/runtime.js';
-import { PluginProcess } from '../src/extensions/plugin-process.js';
 
 const directories: string[] = [];
 function temporaryDirectory(): string {
@@ -26,7 +25,7 @@ async function runtimeFor(root: string): Promise<OpenLabRuntime> {
   return runtime;
 }
 
-describe('protocol-v4 scientific workbench foundation', () => {
+describe('scientific kernel foundation', () => {
   it('applies and undoes multi-file edits atomically and exposes pending diffs', async () => {
     const root = temporaryDirectory();
     writeFileSync(join(root, 'a.txt'), 'alpha', 'utf8');
@@ -138,18 +137,5 @@ describe('protocol-v4 scientific workbench foundation', () => {
       expect(restored.restored).toHaveLength(2);
       expect(existsSync(join(root, 'restored-v1', 'source'))).toBe(true);
     } finally { await runtime.stop(); }
-  }, 20_000);
-
-  it('keeps the dormant legacy plugin protocol compatible for a future worktable rebuild', async () => {
-    const root = temporaryDirectory();
-    const legacyRoot = join(root, 'legacy');
-    mkdirSync(legacyRoot, { recursive: true });
-    writeFileSync(join(legacyRoot, 'index.mjs'), "export default { tools: [] };", 'utf8');
-    const legacyManifest: PluginManifest = {
-      schemaVersion: 1, id: 'legacy.fixture', name: 'Legacy', version: '1.0.0', engine: '^0.1.0', entry: 'index.mjs', permissions: [], contributes: { tools: [] },
-    };
-    const processHost = new PluginProcess({ manifest: legacyManifest, root: legacyRoot, projectRoot: root });
-    expect(await processHost.start()).toMatchObject({ apiVersion: 1 });
-    await processHost.stop();
   }, 20_000);
 });

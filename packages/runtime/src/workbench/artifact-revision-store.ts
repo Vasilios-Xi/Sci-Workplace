@@ -13,7 +13,7 @@ import type {
 } from '@openlab/protocol';
 import type { SqliteEventStore } from '../events/event-store.js';
 import { PathGuard } from '../security/path-guard.js';
-import { atomicWriteJson, atomicWriteText } from '../util/files.js';
+import { atomicWriteJson, atomicWriteText, copyFilePortableSync } from '../util/files.js';
 import { isRecord, toJson } from '../util/json.js';
 import { sha256FileSync } from './file-hash.js';
 import { validateAnnotationSelector } from './annotation-store.js';
@@ -101,7 +101,7 @@ export class ArtifactRevisionStore {
       const parent = this.#revisions.get(input.parentRevisionId);
       if (!parent || parent.artifactId !== input.artifactId) throw new Error('父 revision 不属于同一个 Artifact');
     }
-    if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 512) throw new Error('Artifact revision 必须包含 1–512 个文件');
+    if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 4_096) throw new Error('Artifact revision 必须包含 1–4,096 个文件');
     const revisionId = randomUUID();
     const inlineRoot = join(this.#archiveRoot, 'revisions', revisionId);
     const stagingRoot = join(this.#archiveRoot, 'revisions', `.staging-${revisionId}`);
@@ -212,7 +212,7 @@ export class ArtifactRevisionStore {
       const destination = join(this.#archiveRoot, relativeObject);
       if (!existsSync(destination)) {
         mkdirSync(dirname(destination), { recursive: true });
-        copyFileSync(absolute, destination);
+        copyFilePortableSync(absolute, destination);
       }
       return { ...file, archivedPath: `.openlab/archive/${relativeObject}`, external: false };
     });

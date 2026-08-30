@@ -4,7 +4,7 @@
   "kind": "reader-runtime",
   "name": "Sci Workplace Reader Runtime",
   "version": "0.1.0",
-  "workerVersion": "0.2.19",
+  "workerVersion": "0.2.23",
   "executables": {
     "reader-worker": "reader-worker.exe"
   },

@@ -2,7 +2,7 @@ import { agentV3ZhCN, hanaZhCN, t } from "./../i18n/zh-CN.js";
 import type { BootstrapSnapshot } from '@openlab/protocol';
 const now = new Date().toISOString();
 export const mockSnapshot: BootstrapSnapshot = {
-    protocolVersion: 5,
+    protocolVersion: 6,
     mode: 'demo',
     project: { id: 'demo-project', name: t("copy241"), rootPath: 'D:\\Research\\TumorMetabolism', openedAt: now },
     primaryAgent: {
@@ -12,8 +12,10 @@ export const mockSnapshot: BootstrapSnapshot = {
         configuredAt: now, updatedAt: now,
     },
     settings: {
-        defaultAgentModel: 'deepseek-v4-pro', utilityModel: 'deepseek-v4-flash', maxConcurrentAgentRuns: 3,
+        defaultAgentModel: 'deepseek-v4-pro', utilityModel: 'deepseek-v4-flash',
+        paperReaderTextModel: 'deepseek-v4-pro', paperReaderVisionModel: 'deepseek-v4-flash-vision-exp', maxConcurrentAgentRuns: 3,
         defaultAgentContextBudget: 128000, delegatedAgentContextBudget: 96000,
+        developerMode: false,
         securityPolicy: {
             schemaVersion: 1, projectRead: 'allow', workspaceWrite: 'ask', terminalExecution: 'ask', deletion: 'ask',
             networkAccess: 'ask', outsideWorkspace: 'ask', extensionInstall: 'ask', externalTools: 'ask',
@@ -42,15 +44,25 @@ export const mockSnapshot: BootstrapSnapshot = {
     workbenchContributions: [],
     worktableTemplates: [],
     worktable: { instances: [] },
+    workbenchBlueprints: [],
+    workbenchInstances: [],
+    layoutProposals: [],
+    evidenceAnchors: [],
+    runRecords: [],
+    reviewRequests: [],
     browserProfiles: [],
     browserSessions: [],
     generatedApps: [],
+    generatedAppBlueprints: [],
     annotations: [],
     annotationSets: [],
     artifactRevisions: [],
     sourceMaps: [],
     jobs: [],
     toolchains: [],
+    toolchainAdapters: [],
+    toolRuns: [],
+    paperReaders: [],
     agentDefinitions: [{
         id: 'agent-demo', name: t("copy232"), avatar: 'sage', templateId: 'research_lead',
         identity: hanaZhCN.agentProfile.roles.research_partner.identity,
@@ -105,6 +117,7 @@ export const mockSnapshot: BootstrapSnapshot = {
     skills: [],
     mcpServers: [],
     plugins: [],
+    pluginCatalog: { status: { source: 'empty', sequence: 0 }, entries: [] },
     pendingApprovals: [],
     providers: [],
     models: [{ id: 'openlab-demo', label: t("copy264"), contextWindow: 128000, supportsThinking: true, supportsTools: true, supportsVision: false }],

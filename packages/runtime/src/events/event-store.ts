@@ -12,6 +12,9 @@ interface EventRow {
   schema_version: number;
   timestamp: string;
   actor_json: string;
+  device_id: string;
+  idempotency_key: string;
+  entity_revision: number;
   agent_id: string | null;
   trace_id: string;
   provenance_json: string;
@@ -22,6 +25,9 @@ export interface AppendEventInput<TPayload extends JsonValue> {
   streamId: string;
   kind: string;
   actor: EventActor;
+  deviceId?: string;
+  idempotencyKey?: string;
+  revision?: number;
   agentId?: string;
   traceId?: string;
   provenanceRefs?: string[];
@@ -38,6 +44,9 @@ function rowToEvent(row: EventRow): RuntimeEventEnvelope {
     schemaVersion: row.schema_version,
     timestamp: row.timestamp,
     actor: JSON.parse(row.actor_json) as EventActor,
+    deviceId: row.device_id || 'legacy-device',
+    idempotencyKey: row.idempotency_key || `legacy:${row.id}`,
+    revision: Number(row.entity_revision) || row.sequence,
     traceId: row.trace_id,
     provenanceRefs: JSON.parse(row.provenance_json) as string[],
     payload: JSON.parse(row.payload_json) as JsonValue,
@@ -47,12 +56,19 @@ function rowToEvent(row: EventRow): RuntimeEventEnvelope {
 
 export class SqliteEventStore {
   readonly #database: DatabaseSync;
+  readonly #deviceId: string;
   readonly #temporaryStreams = new Map<string, RuntimeEventEnvelope[]>();
   #closed = false;
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
     this.#database = new DatabaseSync(path);
+    // More than one warm Runtime can briefly share an application event DB
+    // while the desktop switches between cached project/conversation hosts.
+    // WAL permits concurrent readers, but a second writer otherwise fails
+    // immediately at BEGIN IMMEDIATE. Let short, legitimate writes drain
+    // before surfacing SQLITE_BUSY to the caller.
+    this.#database.exec('PRAGMA busy_timeout = 5000;');
     this.#database.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -65,6 +81,9 @@ export class SqliteEventStore {
         schema_version INTEGER NOT NULL,
         timestamp TEXT NOT NULL,
         actor_json TEXT NOT NULL,
+        device_id TEXT NOT NULL DEFAULT 'legacy-device',
+        idempotency_key TEXT NOT NULL DEFAULT '',
+        entity_revision INTEGER NOT NULL DEFAULT 0,
         agent_id TEXT,
         trace_id TEXT NOT NULL,
         provenance_json TEXT NOT NULL,
@@ -84,10 +103,10 @@ export class SqliteEventStore {
       );
     `);
     const current = Number((this.#database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-    if (current > 4) {
+    if (current > 5) {
       this.#database.close();
       this.#closed = true;
-      throw new Error(`数据库 schema 版本 ${current} 高于当前支持版本 4`);
+      throw new Error(`数据库 schema 版本 ${current} 高于当前支持版本 5`);
     }
     this.#database.exec('BEGIN IMMEDIATE');
     try {
@@ -138,6 +157,28 @@ export class SqliteEventStore {
           PRAGMA user_version = 4;
         `);
       }
+      if (current < 5) {
+        const eventColumns = new Set(
+          (this.#database.prepare('PRAGMA table_info(runtime_events)').all() as Array<{ name: string }>).map((column) => column.name),
+        );
+        if (!eventColumns.has('device_id')) {
+          this.#database.exec("ALTER TABLE runtime_events ADD COLUMN device_id TEXT NOT NULL DEFAULT 'legacy-device'");
+        }
+        if (!eventColumns.has('idempotency_key')) {
+          this.#database.exec("ALTER TABLE runtime_events ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''");
+        }
+        if (!eventColumns.has('entity_revision')) {
+          this.#database.exec('ALTER TABLE runtime_events ADD COLUMN entity_revision INTEGER NOT NULL DEFAULT 0');
+        }
+        this.#database.exec(`
+          UPDATE runtime_events SET idempotency_key = 'legacy:' || id WHERE idempotency_key = '';
+          UPDATE runtime_events SET entity_revision = sequence WHERE entity_revision = 0;
+          CREATE UNIQUE INDEX IF NOT EXISTS runtime_events_idempotency_idx
+            ON runtime_events(stream_id, idempotency_key);
+          INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, CURRENT_TIMESTAMP);
+          PRAGMA user_version = 5;
+        `);
+      }
       this.#database.exec('COMMIT');
     } catch (error) {
       this.#database.exec('ROLLBACK');
@@ -151,19 +192,36 @@ export class SqliteEventStore {
       this.#closed = true;
       throw new Error(`SQLite 完整性检查失败：${check.quick_check}`);
     }
+    const storedDeviceId = this.getValue<string>('device.id');
+    this.#deviceId = storedDeviceId ?? randomUUID();
+    if (!storedDeviceId) this.setValue('device.id', this.#deviceId);
   }
 
   append<TPayload extends JsonValue>(input: AppendEventInput<TPayload>): RuntimeEventEnvelope<TPayload> {
     const temporary = this.#temporaryStreams.get(input.streamId);
     if (temporary) {
+      if (input.idempotencyKey) {
+        const existing = temporary.find((event) => event.idempotencyKey === input.idempotencyKey);
+        if (existing) {
+          if (existing.kind !== input.kind || JSON.stringify(existing.payload) !== JSON.stringify(input.payload)) {
+            throw new Error(`幂等键 ${input.idempotencyKey} 已用于不同事件`);
+          }
+          return structuredClone(existing) as RuntimeEventEnvelope<TPayload>;
+        }
+      }
+      const id = randomUUID();
+      const sequence = temporary.length + 1;
       const event: RuntimeEventEnvelope<TPayload> = {
-        id: randomUUID(),
+        id,
         streamId: input.streamId,
-        sequence: temporary.length + 1,
+        sequence,
         kind: input.kind,
         schemaVersion: 1,
         timestamp: input.timestamp ?? new Date().toISOString(),
         actor: input.actor,
+        deviceId: input.deviceId ?? this.#deviceId,
+        idempotencyKey: input.idempotencyKey ?? `event:${id}`,
+        revision: input.revision ?? sequence,
         traceId: input.traceId ?? randomUUID(),
         provenanceRefs: input.provenanceRefs ?? [],
         payload: input.payload,
@@ -174,17 +232,35 @@ export class SqliteEventStore {
     }
     this.#database.exec('BEGIN IMMEDIATE');
     try {
+      if (input.idempotencyKey) {
+        const duplicate = this.#database.prepare(`
+          SELECT * FROM runtime_events WHERE stream_id = ? AND idempotency_key = ?
+        `).get(input.streamId, input.idempotencyKey) as unknown as EventRow | undefined;
+        if (duplicate) {
+          const existing = rowToEvent(duplicate);
+          if (existing.kind !== input.kind || JSON.stringify(existing.payload) !== JSON.stringify(input.payload)) {
+            throw new Error(`幂等键 ${input.idempotencyKey} 已用于不同事件`);
+          }
+          this.#database.exec('COMMIT');
+          return existing as RuntimeEventEnvelope<TPayload>;
+        }
+      }
       const row = this.#database.prepare(
         'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM runtime_events WHERE stream_id = ?',
       ).get(input.streamId) as { sequence: number };
+      const id = randomUUID();
+      const sequence = Number(row.sequence) + 1;
       const event: RuntimeEventEnvelope<TPayload> = {
-        id: randomUUID(),
+        id,
         streamId: input.streamId,
-        sequence: Number(row.sequence) + 1,
+        sequence,
         kind: input.kind,
         schemaVersion: 1,
         timestamp: input.timestamp ?? new Date().toISOString(),
         actor: input.actor,
+        deviceId: input.deviceId ?? this.#deviceId,
+        idempotencyKey: input.idempotencyKey ?? `event:${id}`,
+        revision: input.revision ?? sequence,
         traceId: input.traceId ?? randomUUID(),
         provenanceRefs: input.provenanceRefs ?? [],
         payload: input.payload,
@@ -193,8 +269,9 @@ export class SqliteEventStore {
       this.#database.prepare(`
         INSERT INTO runtime_events (
           id, stream_id, sequence, kind, schema_version, timestamp,
-          actor_json, agent_id, trace_id, provenance_json, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          actor_json, device_id, idempotency_key, entity_revision,
+          agent_id, trace_id, provenance_json, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         event.id,
         event.streamId,
@@ -203,6 +280,9 @@ export class SqliteEventStore {
         event.schemaVersion,
         event.timestamp,
         JSON.stringify(event.actor),
+        event.deviceId,
+        event.idempotencyKey,
+        event.revision,
         event.agentId ?? null,
         event.traceId,
         JSON.stringify(event.provenanceRefs),
@@ -266,6 +346,53 @@ export class SqliteEventStore {
   /** Keeps every event for this stream in memory only. Used by temporary chats. */
   markTemporaryStream(streamId: string): void {
     if (!this.#temporaryStreams.has(streamId)) this.#temporaryStreams.set(streamId, []);
+  }
+
+  /**
+   * Makes an in-memory stream durable without changing its event identities.
+   * Workbench bindings use this when the deferred first conversation becomes
+   * shared application state that must survive a restart.
+   */
+  persistTemporaryStream(streamId: string): void {
+    const temporary = this.#temporaryStreams.get(streamId);
+    if (!temporary) return;
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.#database.prepare(
+        'SELECT COUNT(*) AS count FROM runtime_events WHERE stream_id = ?',
+      ).get(streamId) as { count: number };
+      if (Number(existing.count) !== 0) throw new Error(`临时事件流已存在持久化事件：${streamId}`);
+      const insert = this.#database.prepare(`
+        INSERT INTO runtime_events (
+          id, stream_id, sequence, kind, schema_version, timestamp,
+          actor_json, device_id, idempotency_key, entity_revision,
+          agent_id, trace_id, provenance_json, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const event of temporary) {
+        insert.run(
+          event.id,
+          event.streamId,
+          event.sequence,
+          event.kind,
+          event.schemaVersion,
+          event.timestamp,
+          JSON.stringify(event.actor),
+          event.deviceId,
+          event.idempotencyKey,
+          event.revision,
+          event.agentId ?? null,
+          event.traceId,
+          JSON.stringify(event.provenanceRefs),
+          JSON.stringify(event.payload),
+        );
+      }
+      this.#database.exec('COMMIT');
+      this.#temporaryStreams.delete(streamId);
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   discardTemporaryStream(streamId: string): void {

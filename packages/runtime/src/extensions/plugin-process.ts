@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AgentPreset, AgentTemplate, ContextContribution, JsonValue, PluginManifest, PluginPermission, PluginWorkflowDefinition, PluginWorkflowResult, ToolDefinition, ToolExecutionResult } from '@openlab/protocol';
+import type { AgentPreset, AgentTemplate, ContextContribution, JsonValue, PluginManifest, PluginWorkflowDefinition, PluginWorkflowResult, ToolDefinition, ToolExecutionResult } from '@openlab/protocol';
 import { attachWindowsJobObject, type WindowsJobAttachment } from '../security/windows-job-host.js';
 import { physicalAsarPath } from '../util/asar.js';
 
@@ -14,7 +14,7 @@ interface PendingRpc {
 }
 
 export interface PluginDescription {
-  apiVersion: 1 | 2 | 3;
+  apiVersion: 1 | 2 | 3 | 4;
   tools: Array<Omit<ToolDefinition, 'source' | 'sourceId'>>;
   workflows: PluginWorkflowDefinition[];
   agentTemplates: AgentTemplate[];
@@ -27,7 +27,7 @@ export interface PluginInvocationContext {
   sessionId: string;
   agentId?: string;
   traceId?: string;
-  capabilities: PluginPermission[];
+  capabilities: PluginManifest['permissions'];
   jobId?: string;
   worktableInstanceId?: string;
 }
@@ -79,10 +79,11 @@ export class PluginProcess {
     const runner = existsSync(compiledRunner) ? compiledRunner : physicalAsarPath(fileURLToPath(new URL('./plugin-runner.ts', import.meta.url)));
     const readRoots = [dirname(runner), this.root];
     const legacyApi = (this.manifest.apiVersion ?? 1) === 1;
+    const allowLegacyDirectCapabilities = (this.manifest.apiVersion ?? 1) !== 4;
     if (legacyApi && this.manifest.permissions.includes('project:read')) readRoots.push(this.#projectRoot);
     const nodeArgs = ['--experimental-transform-types', '--permission', ...readRoots.map((path) => `--allow-fs-read=${resolve(path)}`)];
     if (legacyApi && this.manifest.permissions.includes('project:write')) nodeArgs.push(`--allow-fs-write=${resolve(this.#projectRoot)}`);
-    if (this.manifest.permissions.includes('process:spawn')) nodeArgs.push('--allow-child-process');
+    if (allowLegacyDirectCapabilities && this.manifest.permissions.includes('process:spawn')) nodeArgs.push('--allow-child-process');
     nodeArgs.push(runner, this.root, this.manifest.entry);
     this.#child = spawn(process.execPath, nodeArgs, {
       cwd: this.root,
@@ -95,14 +96,14 @@ export class PluginProcess {
         TMP: process.env.TMP,
         ...(process.env.ELECTRON_RUN_AS_NODE ? { ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE } : {}),
         OPENLAB_PLUGIN_HOST: '1',
-        OPENLAB_PLUGIN_NETWORK: this.manifest.permissions.includes('network') ? '1' : '0',
+        OPENLAB_PLUGIN_NETWORK: allowLegacyDirectCapabilities && this.manifest.permissions.includes('network') ? '1' : '0',
       },
     });
     // Electron's Node-compatible host may create one internal helper on Windows.
     // Node's permission model still denies plugin child_process APIs unless the
     // manifest explicitly grants process:spawn, so two job slots do not widen
     // the plugin API surface.
-    this.#job = attachWindowsJobObject(this.#child.pid!, { memoryMb: 768, cpuMs: 30 * 60_000, activeProcesses: this.manifest.permissions.includes('process:spawn') ? 8 : 2 });
+    this.#job = attachWindowsJobObject(this.#child.pid!, { memoryMb: 768, cpuMs: 30 * 60_000, activeProcesses: allowLegacyDirectCapabilities && this.manifest.permissions.includes('process:spawn') ? 8 : 2 });
     this.#child.stdout.on('data', (chunk: Buffer) => this.onStdout(chunk));
     this.#child.stderr.on('data', (chunk: Buffer) => { this.#stderr = `${this.#stderr}${chunk.toString('utf8')}`.slice(-16_000); });
     this.#child.once('exit', () => {

@@ -3,7 +3,7 @@ import type {
   EventActor,
   JobRecord,
   JsonValue,
-  PluginPermission,
+  PluginManifest,
   PluginWorkflowDefinition,
   PluginWorkflowResult,
 } from '@openlab/protocol';
@@ -17,7 +17,7 @@ export interface PersistentWorkflowContext {
   sessionId: string;
   agentId: string;
   traceId: string;
-  capabilities: PluginPermission[];
+  capabilities: PluginManifest['permissions'];
   worktableInstanceId?: string;
 }
 

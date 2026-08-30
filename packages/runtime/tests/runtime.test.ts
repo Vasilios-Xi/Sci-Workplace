@@ -341,7 +341,7 @@ describe('OpenLab runtime', () => {
     const config = { host: '127.0.0.1' as const, port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: true };
     const runtime = new OpenLabRuntime(config);
     await runtime.initialize();
-    expect(runtime.setHarnessSettings({
+    expect(await runtime.setHarnessSettings({
       maxConcurrentAgentRuns: 2,
       defaultAgentContextBudget: 256_000,
       utilityModel: 'deepseek-v4-pro',
@@ -449,6 +449,47 @@ describe('OpenLab runtime', () => {
     expect(afterRestart.agentDefinitions[0]).toMatchObject({ name: '星野', status: 'active' });
     expect(afterRestart.agentRuns).toHaveLength(1);
     expect(afterRestart.agentRuns[0]).toMatchObject({ role: 'lead', name: '星野' });
+    await restored.stop();
+  });
+
+  it('keeps the first desktop conversation transient until the user explicitly creates it', async () => {
+    const root = temporaryDirectory();
+    const config = {
+      host: '127.0.0.1' as const,
+      port: 0,
+      authToken: 'token',
+      projectRoot: root,
+      home: join(root, '.runtime'),
+      demo: true,
+      deferInitialSession: true,
+    };
+    const runtime = new OpenLabRuntime(config);
+    await runtime.initialize();
+
+    const fresh = await runtime.snapshot();
+    expect(fresh.sessionCatalog).toHaveLength(0);
+    expect(fresh.sessions).toEqual([expect.objectContaining({ id: fresh.activeSessionId, temporary: true })]);
+
+    runtime.configurePrimaryAgent({ name: '星野' });
+    const configured = await runtime.snapshot();
+    expect(configured.sessionCatalog).toHaveLength(0);
+    expect(configured.sessions.filter((session) => !session.temporary)).toHaveLength(0);
+    expect(configured.activeSessionId).toBe(fresh.activeSessionId);
+
+    const created = runtime.createSession('用户创建的首个对话');
+    const afterCreation = await runtime.snapshot();
+    expect(afterCreation.activeSessionId).toBe(created.id);
+    expect(afterCreation.sessions).toHaveLength(1);
+    expect(afterCreation.sessions[0]).toMatchObject({ id: created.id });
+    expect(afterCreation.sessions[0]?.temporary).toBeUndefined();
+    expect(afterCreation.sessionCatalog).toEqual([expect.objectContaining({ id: created.id })]);
+    await runtime.stop();
+
+    const restored = new OpenLabRuntime(config);
+    await restored.initialize();
+    const afterRestart = await restored.snapshot();
+    expect(afterRestart.activeSessionId).toBe(created.id);
+    expect(afterRestart.sessions).toEqual([expect.objectContaining({ id: created.id })]);
     await restored.stop();
   });
 
@@ -816,7 +857,7 @@ describe('OpenLab runtime', () => {
     const runtime = new OpenLabRuntime({ host: '127.0.0.1', port: 0, authToken: 'token', projectRoot: root, home: join(root, '.runtime'), demo: false, modelProvider: provider });
     await runtime.initialize();
     await createFirstAgent(runtime);
-    runtime.setHarnessSettings({ defaultAgentContextBudget: 32_000, delegatedAgentContextBudget: 32_000, defaultAgentModel: 'deepseek-v4-flash', utilityModel: 'deepseek-v4-flash' });
+    await runtime.setHarnessSettings({ defaultAgentContextBudget: 32_000, delegatedAgentContextBudget: 32_000, defaultAgentModel: 'deepseek-v4-flash', utilityModel: 'deepseek-v4-flash' });
     for (let index = 0; index < 3; index += 1) {
       runtime.submitChat({ text: `第${index + 1}轮${'研'.repeat(9_000)}` });
       await waitUntil(async () => {

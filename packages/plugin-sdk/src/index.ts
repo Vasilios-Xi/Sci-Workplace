@@ -9,6 +9,7 @@ import type {
   ContextContribution,
   DocumentBuffer,
   DocumentRevisionRef,
+  EvidenceAnchorV1,
   JobRecord,
   JobSpec,
   JsonValue,
@@ -35,6 +36,16 @@ import type {
   BrowserProfileSummary,
   BrowserSessionSummary,
   GeneratedWorktableApp,
+  GeneratedAppBlueprintV1,
+  HarnessPluginPermissionV4,
+  LayoutProposalV1,
+  MountIntentV1,
+  ToolRunV1,
+  ToolchainAdapterManifestV1,
+  WorkbenchBlueprintV1,
+  WorkbenchDeviceStateV1,
+  WorkbenchInstanceV1,
+  WorkbenchSlotRole,
   WorktableContextSnapshot,
   WorktableContent,
   WorktableInstance,
@@ -71,12 +82,27 @@ export type {
   BrowserProfileSummary,
   BrowserSessionSummary,
   GeneratedWorktableApp,
+  EvidenceAnchorV1,
+  GeneratedAppBlueprintV1,
+  HarnessPluginManifestV4,
+  HarnessPluginPermissionV4,
+  LayoutProposalV1,
+  MountIntentV1,
+  ResourceRevisionRef,
+  ArtifactRevisionRef,
+  ReviewRequestV1,
+  RunRecordV1,
+  ToolRunV1,
+  ToolchainAdapterManifestV1,
+  WorkbenchBlueprintV1,
+  WorkbenchDeviceStateV1,
+  WorkbenchInstanceV1,
   WorktableContextSnapshot,
   WorktableInstance,
   WorktableState,
 } from '@openlab/protocol';
 
-export const OPENLAB_PLUGIN_API_VERSION = 3 as const;
+export const OPENLAB_PLUGIN_API_VERSION = 4 as const;
 
 export type PluginHostCapability =
   | 'workspace:read'
@@ -96,7 +122,17 @@ export type PluginHostCapability =
   | 'worktable:write'
   | 'browser:observe'
   | 'browser:interact'
-  | 'generated-apps:publish';
+  | 'generated-apps:publish'
+  | 'documents:read'
+  | 'evidence:read'
+  | 'evidence:write'
+  | 'artifacts:publish'
+  | 'workbench:read'
+  | 'workbench:write'
+  | 'workbench:mount'
+  | 'workbench:propose-layout'
+  | 'generated-apps:build'
+  | 'toolchains:execute';
 
 export interface WorkspaceHostApi {
   list(ref: WorkspacePathRef): Promise<WorkspaceEntry[]>;
@@ -128,6 +164,14 @@ export interface ModelHostApi {
 
 export interface ToolchainHostApi {
   list(kind?: string): Promise<ToolchainDescriptor[]>;
+}
+
+export interface ToolchainHostApiV4 extends ToolchainHostApi {
+  adapters(): Promise<ToolchainAdapterManifestV1[]>;
+  run(input: { adapterId: string; operationId: string; values: Record<string, JsonValue>; confirmed: boolean }): Promise<ToolRunV1>;
+  getRun(id: string): Promise<ToolRunV1>;
+  cancelRun(id: string): Promise<ToolRunV1>;
+  runLog(id: string, offset?: number): Promise<{ content: string; nextOffset: number }>;
 }
 
 export interface WorkflowHostApi {
@@ -223,6 +267,42 @@ export interface WorktableHostApi {
   setStatus(instanceId: string, status: WorktableInstance['status']): Promise<WorktableInstance>;
 }
 
+export interface WorkflowHostApiV4 extends Omit<WorkflowHostApi, 'start'> {
+  start(workflowId: string, input: Record<string, JsonValue>, options?: { workbenchInstanceId?: string }): Promise<JobRecord>;
+}
+
+export interface EvidenceHostApiV4 {
+  list(target?: DocumentRevisionRef): Promise<EvidenceAnchorV1[]>;
+  create(input: {
+    target: DocumentRevisionRef;
+    selector: AnnotationSelector;
+    page?: number;
+    blockId?: string;
+    asset?: EvidenceAnchorV1['asset'];
+    exact?: string;
+    idempotencyKey?: string;
+  }): Promise<EvidenceAnchorV1>;
+}
+
+/** Public v4 API. `WorktableHostApi` is retained only for installed v3 code. */
+export interface WorkbenchHostApiV4 {
+  list(): Promise<WorkbenchInstanceV1[]>;
+  inspect(instanceId: string): Promise<WorkbenchInstanceV1>;
+  create(input: { blueprintId: string; title?: string; primaryConversationId?: string; inputs?: Record<string, JsonValue> }): Promise<WorkbenchInstanceV1>;
+  open(instanceId: string): Promise<WorkbenchInstanceV1>;
+  mount(intent: MountIntentV1): Promise<WorkbenchInstanceV1>;
+  proposeLayout(input: {
+    instanceId: string;
+    baseRevision: number;
+    title: string;
+    reason: string;
+    layout: WorkbenchBlueprintV1['layout'];
+    panes: WorkbenchBlueprintV1['panes'];
+    slots: WorkbenchBlueprintV1['slots'];
+  }): Promise<LayoutProposalV1>;
+  reveal(input: { instanceId: string; anchorId: string; targetRole?: WorkbenchSlotRole }): Promise<void>;
+}
+
 export interface BrowserHostApi {
   profiles(): Promise<BrowserProfileSummary[]>;
   sessions(): Promise<BrowserSessionSummary[]>;
@@ -234,6 +314,11 @@ export interface BrowserHostApi {
 export interface GeneratedAppHostApi {
   list(): Promise<GeneratedWorktableApp[]>;
   publish(input: { title: string; source: WorkspacePathRef; entry: string; networkDomains?: string[]; hostCapabilities?: string[]; confirmed: boolean }): Promise<GeneratedWorktableApp>;
+}
+
+export interface GeneratedAppHostApiV4 {
+  list(): Promise<GeneratedWorktableApp[]>;
+  propose(prompt: string): Promise<GeneratedAppBlueprintV1>;
 }
 
 export interface PluginStorageApi {
@@ -261,6 +346,15 @@ export interface PluginHost {
   generatedApps: GeneratedAppHostApi;
 }
 
+export type PluginHostV4 = Omit<PluginHost, 'capabilities' | 'toolchains' | 'workflows' | 'workbench' | 'worktable' | 'generatedApps'> & {
+  readonly capabilities: HarnessPluginPermissionV4[];
+  toolchains: ToolchainHostApiV4;
+  workflows: WorkflowHostApiV4;
+  evidence: EvidenceHostApiV4;
+  workbenches: WorkbenchHostApiV4;
+  generatedApps: GeneratedAppHostApiV4;
+};
+
 export interface PluginExecutionContext {
   projectId: string;
   sessionId: string;
@@ -271,6 +365,10 @@ export interface PluginExecutionContext {
   /** Aborted when the user cancels this invocation, the timeout expires, or
    * the host shuts down. Cancellation does not disable the plugin process. */
   signal: AbortSignal;
+}
+
+export interface PluginExecutionContextV4 extends Omit<PluginExecutionContext, 'host'> {
+  host: PluginHostV4;
 }
 
 export interface LegacyPluginExecutionContext {
@@ -293,9 +391,15 @@ export interface PluginWorkflowContext extends PluginExecutionContext {
   worktableInstanceId?: string;
 }
 
-export interface OpenLabPluginWorkflow {
+export interface PluginWorkflowContextV4 extends Omit<PluginWorkflowContext, 'host' | 'worktableInstanceId'> {
+  host: PluginHostV4;
+  /** Stable Workbench v1 instance bound to this workflow run. */
+  workbenchInstanceId?: string;
+}
+
+export interface OpenLabPluginWorkflow<TContext = PluginWorkflowContext> {
   definition: PluginWorkflowDefinition;
-  run(input: Record<string, JsonValue>, context: PluginWorkflowContext): Promise<PluginWorkflowResult>;
+  run(input: Record<string, JsonValue>, context: TContext): Promise<PluginWorkflowResult>;
 }
 
 export interface OpenLabPluginV2 {
@@ -316,6 +420,15 @@ export interface OpenLabPluginV3 {
   dispose?: () => Promise<void> | void;
 }
 
+export interface OpenLabPluginV4 {
+  apiVersion: 4;
+  tools?: Array<OpenLabPluginTool<PluginExecutionContextV4>>;
+  workflows?: Array<OpenLabPluginWorkflow<PluginWorkflowContextV4>>;
+  context?: (input: { projectId: string; sessionId: string; agentId: string; settings: Record<string, JsonValue>; host: PluginHostV4 }) => Promise<ContextContribution[]> | ContextContribution[];
+  agentTemplates?: AgentTemplate[];
+  dispose?: () => Promise<void> | void;
+}
+
 export interface OpenLabPluginV1 {
   apiVersion: 1;
   tools?: Array<OpenLabPluginTool<LegacyPluginExecutionContext>>;
@@ -326,10 +439,15 @@ export interface OpenLabPluginV1 {
   dispose?: () => Promise<void> | void;
 }
 
-export type OpenLabPlugin = OpenLabPluginV1 | OpenLabPluginV2 | OpenLabPluginV3;
+/** Formal Plugin API v4 authoring surface. Legacy shapes are parsed only by the
+ * isolated runtime for dormant local installations and are not an authoring
+ * contract. */
+export type OpenLabPlugin = OpenLabPluginV4;
+export type LegacyOpenLabPlugin = OpenLabPluginV1 | OpenLabPluginV2 | OpenLabPluginV3;
+export type AnyOpenLabPlugin = LegacyOpenLabPlugin | OpenLabPluginV4;
 
 export function definePlugin<TPlugin extends OpenLabPlugin>(plugin: TPlugin): TPlugin {
-  if (plugin.apiVersion !== 1 && plugin.apiVersion !== 2 && plugin.apiVersion !== OPENLAB_PLUGIN_API_VERSION) {
+  if (plugin.apiVersion !== OPENLAB_PLUGIN_API_VERSION) {
     throw new Error(`不支持的 OpenLab Plugin API：${String((plugin as { apiVersion?: unknown }).apiVersion)}`);
   }
   return plugin;

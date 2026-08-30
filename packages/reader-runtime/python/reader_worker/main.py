@@ -98,6 +98,9 @@ CHEMICAL_ELEMENTS = {
 SPACED_FORMULA_RE = re.compile(
     r"(?<![A-Za-z])(?:[A-Z][a-z]?\s*(?:\d+(?:\.\d+)?\s*)?){2,}(?![A-Za-z])"
 )
+PUBLISHER_GLYPH_PROBE_RE = re.compile(
+    r"^(?:1234567890[()\[\]{}:;,.'\"!?|/\\+\-=]*)+$"
+)
 
 
 @dataclass
@@ -125,7 +128,7 @@ def package_version(name: str) -> str | None:
 def capabilities() -> dict[str, Any]:
     docling_version = package_version("docling") or package_version("docling-slim")
     return {
-        "worker_version": "0.2.19",
+        "worker_version": "0.2.23",
         "capabilities": [
             "pdf-inspect",
             "selectable-text",
@@ -211,6 +214,30 @@ def normalize_text(value: str) -> str:
         value = value.replace(damaged, repaired)
     value = re.sub(r"\s+", " ", value).strip()
     return value
+
+
+def is_publisher_glyph_probe(value: str) -> bool:
+    """Identify invisible publisher font-test strings without guessing at data.
+
+    Some Nature PDFs embed ``1234567890():,;`` twice in the selectable text
+    layer to exercise a subset font. The glyphs are not painted on the page,
+    but pdfplumber exposes them as ordinary lines. Requiring the exact ordered
+    digit sequence plus at least three distinct punctuation characters keeps
+    the rule narrow enough that measurements, identifiers and phone numbers
+    remain valid evidence.
+    """
+    compact = re.sub(r"\s+", "", normalize_text(value))
+    if not compact or len(compact) > 96 or not PUBLISHER_GLYPH_PROBE_RE.fullmatch(compact):
+        return False
+    punctuation = {character for character in compact if not character.isdigit()}
+    return len(punctuation) >= 3
+
+
+def remove_nonsemantic_text_layer_artifacts(blocks: list[dict[str, Any]]) -> int:
+    kept = [block for block in blocks if not is_publisher_glyph_probe(str(block.get("originalText", "")))]
+    removed = len(blocks) - len(kept)
+    blocks[:] = kept
+    return removed
 
 
 def normalize_scientific_text(value: str) -> str:
@@ -540,6 +567,96 @@ def bbox_center_inside(inner: list[float], outer: list[float], padding: float = 
         outer[0] - padding <= center_x <= outer[2] + padding
         and outer[1] - padding <= center_y <= outer[3] + padding
     )
+
+
+def is_substantive_visual_region(
+    bbox: list[float], page_width: float, page_height: float
+) -> bool:
+    """Return whether an uncaptioned region is large enough to be a real visual.
+
+    Docling can report an axis tick, legend swatch, publisher badge, or a single
+    label as a table/picture region. Those regions remain internal coordinate
+    evidence, but must never become standalone user-visible recognition jobs.
+    """
+    if len(bbox) != 4 or page_width <= 0 or page_height <= 0:
+        return False
+    width = max(0.0, float(bbox[2]) - float(bbox[0]))
+    height = max(0.0, float(bbox[3]) - float(bbox[1]))
+    return (
+        width >= 96.0
+        and height >= 42.0
+        and width * height >= page_width * page_height * 0.012
+    )
+
+
+def is_substantive_formula_region(bbox: list[float], expression: str) -> bool:
+    """Reject isolated glyphs that a layout model mislabeled as equations.
+
+    A real displayed equation may be physically compact, so this gate is much
+    less strict than the figure/table gate. It normally requires both a
+    non-trivial source rectangle and mathematical structure. Some PDFs expose
+    only the equation number in the text layer while Docling's formula bbox
+    still spans the whole displayed equation; a wide equation row is therefore
+    accepted even when its transcription is only ``(n)``. Rejected regions
+    remain in the source map, but are never rendered or sent to a vision model.
+    """
+    if len(bbox) != 4:
+        return False
+    width = max(0.0, float(bbox[2]) - float(bbox[0]))
+    height = max(0.0, float(bbox[3]) - float(bbox[1]))
+    normalized = normalize_formula_transcription(expression)
+    if not normalized or normalized.startswith("[公式转写失败"):
+        return False
+    scientific = re.sub(r"[^A-Za-z0-9\u0370-\u03ff]", "", normalized)
+    has_structure = bool(
+        re.search(r"[=<>≈≤≥+−×÷/∂∇∫∑_^→↔]", normalized)
+        or re.search(r"\\(?:frac|sqrt|sum|int|partial|nabla|ce)\b", normalized)
+    )
+    equation_number_only = bool(re.fullmatch(r"\(?\s*[A-Za-z]?\d+(?:[.:-]\d+)?\s*\)?", normalized))
+    wide_display_row = (
+        width >= 144.0
+        and height >= 6.0
+        and width * height >= 1_200.0
+        and width / max(height, 1.0) >= 5.0
+    )
+    return (
+        width >= 20.0
+        and height >= 6.0
+        and width * height >= 120.0
+        and (
+            (len(scientific) >= 2 and has_structure)
+            or (equation_number_only and wide_display_row)
+        )
+    )
+
+
+def expanded_crop_bbox(
+    bbox: list[float],
+    page_width: float,
+    page_height: float,
+    *,
+    minimum_width: float,
+    minimum_height: float,
+    padding_x: float,
+    padding_y: float,
+) -> list[float]:
+    """Pad a crop and guarantee a useful rendered resolution within the page."""
+    left = max(0.0, float(bbox[0]) - padding_x)
+    top = max(0.0, float(bbox[1]) - padding_y)
+    right = min(page_width, float(bbox[2]) + padding_x)
+    bottom = min(page_height, float(bbox[3]) + padding_y)
+
+    def expand(start: float, end: float, limit: float, minimum: float) -> tuple[float, float]:
+        desired = min(limit, max(minimum, end - start))
+        center = (start + end) / 2.0
+        expanded_start = max(0.0, center - desired / 2.0)
+        expanded_end = min(limit, expanded_start + desired)
+        expanded_start = max(0.0, expanded_end - desired)
+        return expanded_start, expanded_end
+
+    left, right = expand(left, right, page_width, minimum_width)
+    top, bottom = expand(top, bottom, page_height, minimum_height)
+    return [left, top, right, bottom]
 
 
 def consolidate_docling_text_blocks(
@@ -2187,9 +2304,38 @@ def caption_source_blocks(
     grouped: list[dict[str, Any]] = []
     if docling_item_id:
         grouped = [block for block in blocks if block.get("_doclingItemId") == docling_item_id]
-        grouped_text = normalize_text(" ".join(str(block.get("originalText", "")) for block in grouped))
-        if grouped and re.search(r"[.!?][\"')\]]?$", grouped_text):
-            return grouped
+        # A two-column legend can be emitted as two neighbouring Docling
+        # caption items (one provenance item per column). Collect only those
+        # explicitly labelled caption items. The previous punctuation-based
+        # fallback swept every later block on the page into the legend when
+        # the first column ended mid-sentence, reclassifying body paragraphs,
+        # section headings, figure labels and the journal footer as captions.
+        start_page = int(caption_block["page"])
+        start_order = int(caption_block.get("_doclingItemOrder") or 0)
+        later_starts = [
+            int(candidate.get("_doclingItemOrder") or 0)
+            for candidate in blocks
+            if candidate is not caption_block
+            and candidate.get("_doclingLabel") == "caption"
+            and int(candidate.get("_doclingItemOrder") or 0) > start_order
+            and CAPTION_RE.match(str(candidate.get("originalText", "")))
+        ]
+        next_start_order = min(later_starts, default=sys.maxsize)
+        labelled = [
+            block for block in blocks
+            if block.get("_doclingLabel") == "caption"
+            and start_page <= int(block["page"]) <= start_page + 1
+            and start_order <= int(block.get("_doclingItemOrder") or 0) < next_start_order
+        ]
+        if labelled:
+            seen: set[int] = set()
+            return [
+                block for block in labelled
+                if not (id(block) in seen or seen.add(id(block)))
+            ]
+        # Docling provenance is authoritative even when a short caption does
+        # not end in punctuation. Never fall through to page-wide geometry.
+        return grouped
     page_number = int(caption_block["page"])
     caption_top = float(caption_block["bbox"][1])
     collected: list[dict[str, Any]] = list(grouped)
@@ -2200,6 +2346,11 @@ def caption_source_blocks(
             continue
         if candidate is not caption_block and CAPTION_RE.match(str(candidate.get("originalText", ""))):
             break
+        if candidate is not caption_block and candidate.get("type") in {
+            "heading", "reference", "running_matter", "front_matter",
+            "figure_text", "formula", "table", "table_row",
+        }:
+            continue
         collected.append(candidate)
 
     hint = matching_caption_hint(caption_block, hints)
@@ -2325,7 +2476,7 @@ def render_crop(
     bbox: list[float],
     output_path: Path,
     scale: float = 2.0,
-) -> None:
+) -> tuple[int, int]:
     page = pdf[page_index]
     bitmap = page.render(scale=scale, rotation=0)
     image = bitmap.to_pil()
@@ -2335,9 +2486,12 @@ def render_crop(
     if right - left < 10 or bottom - top < 10:
         raise ValueError(f"Crop too small: {bbox}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.crop((left, top, right, bottom)).save(output_path, format="PNG", optimize=True)
+    crop = image.crop((left, top, right, bottom))
+    crop.save(output_path, format="PNG", optimize=True)
+    dimensions = crop.size
     bitmap.close()
     page.close()
+    return dimensions
 
 
 def render_page(pdf_path: str, page_number: int, output_path: str, scale: float = 1.6) -> dict[str, Any]:
@@ -2467,6 +2621,9 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             pages.append({"page": page_number, "blockIds": page_ids})
 
     blocks = consolidate_docling_text_blocks(blocks, docling_hints)
+    artifact_count = remove_nonsemantic_text_layer_artifacts(blocks)
+    if artifact_count:
+        warnings.append(f"已剔除 {artifact_count} 个出版社文本层字形探针；这些字符在页面上不可见且不属于论文内容。")
     orphan_mark_count = remove_orphan_combining_glyphs(blocks)
     if orphan_mark_count:
         warnings.append(f"已剔除 {orphan_mark_count} 个无语义的零宽度组合字形，避免干扰段落连续性。")
@@ -2499,6 +2656,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
         {
             "page": page_number,
             "blockIds": [block["id"] for block in blocks if int(block["page"]) == page_number],
+            "width": round(float(page_sizes.get(page_number, (0.0, 0.0))[0]), 3),
+            "height": round(float(page_sizes.get(page_number, (0.0, 0.0))[1]), 3),
         }
         for page_number in range(1, int(inspection["page_count"]) + 1)
     ]
@@ -2522,12 +2681,40 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
     # over the first figure's asset path.
     ensure_unique_caption_asset_ids(blocks)
     figures: list[dict[str, Any]] = []
+    profile_image_path: Path | None = None
     pdf = pdfium.PdfDocument(str(path))
     try:
         page_heights = {
             page_index + 1: float(pdf[page_index].get_height())
             for page_index in range(len(pdf))
         }
+        profile_page_number = next(
+            (
+                int(block["page"])
+                for block in blocks
+                if normalize_text(str(block.get("originalText", ""))).casefold()
+                == normalize_text(title).casefold()
+            ),
+            1,
+        )
+        profile_page_number = min(max(profile_page_number, 1), len(pdf)) if len(pdf) else 1
+        if len(pdf) > 0:
+            candidate_profile_path = output_root / "assets" / "title-page.png"
+            try:
+                profile_page = pdf[profile_page_number - 1]
+                first_width = float(profile_page.get_width())
+                first_height = float(profile_page.get_height())
+                profile_page.close()
+                render_crop(
+                    pdf,
+                    profile_page_number - 1,
+                    [0.0, 0.0, first_width, first_height],
+                    candidate_profile_path,
+                    scale=2.0,
+                )
+                profile_image_path = candidate_profile_path
+            except Exception as exc:
+                warnings.append(f"论文首页整页渲染失败：{type(exc).__name__}: {exc}")
         for index, block in enumerate(
             [entry for entry in blocks if entry["type"] == "formula"],
             start=1,
@@ -2536,16 +2723,24 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             page_height = float(pdf[page_number - 1].get_height())
             page_width = float(pdf[page_number - 1].get_width())
             region = [float(value) for value in block["bbox"]]
-            crop_bbox = [
-                max(0.0, region[0] - 7.0),
-                max(0.0, region[1] - 5.0),
-                min(page_width, region[2] + 7.0),
-                min(page_height, region[3] + 5.0),
-            ]
             asset_id = f"E{index:03d}"
+            if not is_substantive_formula_region(region, str(block.get("originalText", ""))):
+                warnings.append(
+                    f"{asset_id} 公式候选仅包含微小字形或缺少数学结构；保留来源坐标但不创建视觉模型输入。"
+                )
+                continue
+            crop_bbox = expanded_crop_bbox(
+                region,
+                page_width,
+                page_height,
+                minimum_width=96.0,
+                minimum_height=28.0,
+                padding_x=7.0,
+                padding_y=5.0,
+            )
             asset_path = output_root / "assets" / f"equation-{index:03d}.png"
             try:
-                render_crop(pdf, page_number - 1, crop_bbox, asset_path, scale=3.0)
+                pixel_width, pixel_height = render_crop(pdf, page_number - 1, crop_bbox, asset_path, scale=3.0)
             except Exception as exc:
                 warnings.append(f"{asset_id} 公式原图裁切失败：{type(exc).__name__}: {exc}")
                 continue
@@ -2553,6 +2748,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 block["refs"].append(asset_id)
             figures.append({
                 "id": asset_id,
+                "kind": "formula",
+                "contentVisual": True,
                 "page": page_number,
                 "captionId": None,
                 "captionBlockIds": [],
@@ -2562,6 +2759,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 "altText": f"Equation {index}",
                 "originalCaption": str(block["originalText"]),
                 "approximate": False,
+                "pixelWidth": pixel_width,
+                "pixelHeight": pixel_height,
             })
         for block in [entry for entry in blocks if entry["type"] == "caption"]:
             match = CAPTION_RE.match(block["originalText"])
@@ -2583,6 +2782,16 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             image_page_number = int(closest_region["page"]) if closest_region is not None else caption_page_number
             page_height = float(pdf[image_page_number - 1].get_height())
             page_width = float(pdf[image_page_number - 1].get_width())
+            if closest_region is not None and not is_substantive_visual_region(
+                [float(value) for value in closest_region["bbox"]], page_width, page_height
+            ):
+                warnings.append(
+                    f"{asset_id} 匹配到的区域过小，已拒绝将图内标签作为独立识图对象并改用版面回退裁剪。"
+                )
+                closest_region = None
+                image_page_number = caption_page_number
+                page_height = float(pdf[image_page_number - 1].get_height())
+                page_width = float(pdf[image_page_number - 1].get_width())
             if closest_region is not None:
                 region = [float(value) for value in closest_region["bbox"]]
                 crop_bbox = [
@@ -2609,8 +2818,10 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 crop_bbox = [36.0, crop_top, page_width - 36.0, crop_bottom]
                 approximate = True
             asset_path = output_root / "assets" / asset_name
+            pixel_width = 0
+            pixel_height = 0
             try:
-                render_crop(pdf, image_page_number - 1, crop_bbox, asset_path)
+                pixel_width, pixel_height = render_crop(pdf, image_page_number - 1, crop_bbox, asset_path)
             except Exception as exc:
                 warnings.append(f"{asset_id} 裁切失败：{type(exc).__name__}: {exc}")
 
@@ -2634,6 +2845,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             fallback_anchor = preceding_reading_anchor(block, blocks)
             figures.append({
                 "id": asset_id,
+                "kind": "table" if is_table else "figure",
+                "contentVisual": True,
                 "page": image_page_number,
                 "captionId": block["id"],
                 "captionBlockIds": caption_block_ids,
@@ -2648,6 +2861,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 "altText": f"{'Table' if is_table else 'Figure'} {number}",
                 "originalCaption": full_caption or block["originalText"],
                 "approximate": approximate,
+                "pixelWidth": pixel_width,
+                "pixelHeight": pixel_height,
             })
             for caption_entry in caption_blocks:
                 caption_entry["refs"].append(asset_id)
@@ -2664,10 +2879,24 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
         # even when the PDF provides no parseable numbered caption. Emit a
         # record for every unmatched table region so Deep Reading can return a
         # verified/needs_review/failed outcome instead of silently omitting it.
-        for index, region_hint in enumerate(
-            unmatched_visual_regions(docling_hints, figures, "table"),
-            start=1,
-        ):
+        unmatched_tables = []
+        ignored_micro_visuals = 0
+        for region_hint in unmatched_visual_regions(docling_hints, figures, "table"):
+            page_number = int(region_hint["page"])
+            page_height = float(pdf[page_number - 1].get_height())
+            page_width = float(pdf[page_number - 1].get_width())
+            region = [float(value) for value in region_hint["bbox"]]
+            # Captionless Docling regions are occasionally only an axis label,
+            # icon, colour key or publisher badge. Keep them as internal
+            # figure_text evidence, but never create a user-facing visual unit.
+            if not is_substantive_visual_region(region, page_width, page_height):
+                ignored_micro_visuals += 1
+                continue
+            unmatched_tables.append(region_hint)
+        if ignored_micro_visuals:
+            warnings.append(f"已收纳 {ignored_micro_visuals} 个微小图内区域，不创建独立图表识别条目。")
+
+        for index, region_hint in enumerate(unmatched_tables, start=1):
             page_number = int(region_hint["page"])
             page_height = float(pdf[page_number - 1].get_height())
             page_width = float(pdf[page_number - 1].get_width())
@@ -2683,8 +2912,10 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 index += 1
                 asset_id = f"TU{index:03d}"
             asset_path = output_root / "assets" / f"table-uncaptioned-{index:03d}.png"
+            pixel_width = 0
+            pixel_height = 0
             try:
-                render_crop(pdf, page_number - 1, crop_bbox, asset_path)
+                pixel_width, pixel_height = render_crop(pdf, page_number - 1, crop_bbox, asset_path)
             except Exception as exc:
                 warnings.append(f"{asset_id} 无图注表格裁切失败：{type(exc).__name__}: {exc}")
 
@@ -2702,6 +2933,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             anchor = preceding_visual_region_anchor(page_number, region, blocks)
             figures.append({
                 "id": asset_id,
+                "kind": "table",
+                "contentVisual": True,
                 "page": page_number,
                 "captionId": None,
                 "captionBlockIds": [],
@@ -2711,6 +2944,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 "altText": f"Uncaptioned table {index}",
                 "originalCaption": table_text[:4000] or f"Uncaptioned table on page {page_number}",
                 "approximate": False,
+                "pixelWidth": pixel_width,
+                "pixelHeight": pixel_height,
             })
             for table_text_block in table_text_blocks:
                 if asset_id not in table_text_block["refs"]:
@@ -2722,6 +2957,9 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             page_number = int(block["page"])
             page_height = float(pdf[page_number - 1].get_height())
             page_width = float(pdf[page_number - 1].get_width())
+            if not is_substantive_visual_region(region, page_width, page_height):
+                warnings.append("图形摘要候选区域过小，已作为内部图内标签收纳。")
+                continue
             crop_bbox = [
                 max(0.0, region[0] - 6.0),
                 max(0.0, region[1] - 6.0),
@@ -2730,8 +2968,10 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             ]
             asset_id = f"GA{index:03d}"
             asset_path = output_root / "assets" / f"graphical-abstract-{index}.png"
+            pixel_width = 0
+            pixel_height = 0
             try:
-                render_crop(pdf, page_number - 1, crop_bbox, asset_path)
+                pixel_width, pixel_height = render_crop(pdf, page_number - 1, crop_bbox, asset_path)
             except Exception as exc:
                 warnings.append(f"{asset_id} 裁切失败：{type(exc).__name__}: {exc}")
 
@@ -2751,6 +2991,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             block["refs"].append(asset_id)
             figures.append({
                 "id": asset_id,
+                "kind": "figure",
+                "contentVisual": True,
                 "page": page_number,
                 "captionId": block["id"],
                 "captionBlockIds": [block["id"]],
@@ -2760,6 +3002,8 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
                 "altText": normalize_text(str(block["originalText"])) or "Graphical abstract",
                 "originalCaption": normalize_text(str(block["originalText"])) or "Graphical abstract",
                 "approximate": False,
+                "pixelWidth": pixel_width,
+                "pixelHeight": pixel_height,
             })
     finally:
         pdf.close()
@@ -2778,6 +3022,7 @@ def parse_pdf(pdf_path: str, output_dir: str, revision_hash: str) -> dict[str, A
             "textCharacters": inspection["text_characters"],
             "encrypted": inspection["encrypted"],
             "hasTextLayer": inspection["has_text_layer"],
+            **({"profileImagePath": str(profile_image_path), "profilePage": profile_page_number} if profile_image_path else {}),
         },
         "blocks": blocks,
         "figures": figures,

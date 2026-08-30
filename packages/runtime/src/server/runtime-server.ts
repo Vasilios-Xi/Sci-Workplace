@@ -45,6 +45,8 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
   const app = new Hono();
   const panelTickets = new Map<string, { html: string; expiresAt: number }>();
   const generatedAppTickets = new Map<string, { appId: string; revisionId: string; expiresAt: number; requests: number }>();
+  const generatedBlueprintTickets = new Map<string, { blueprintId: string; expiresAt: number; requests: number }>();
+  const resourceTickets = new Map<string, { resourceId: string; expiresAt: number; requests: number }>();
   app.use('*', async (context, next) => {
     const origin = context.req.header('origin');
     const loopbackOrigin = origin === 'null' || origin === 'file://' || /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/u.test(origin ?? '');
@@ -74,9 +76,10 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     for (const [ticket, value] of panelTickets) if (value.expiresAt <= now) panelTickets.delete(ticket);
     const value = panelTickets.get(context.req.param('ticket'));
     if (!value || value.expiresAt <= now) return context.text('Panel ticket expired', 404);
+    const runtimeOrigin = new URL(context.req.url).origin;
     return context.body(value.html, 200, {
       'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*",
+      'Content-Security-Policy': `default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; frame-src ${runtimeOrigin}; object-src ${runtimeOrigin}; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*`,
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
     });
@@ -145,6 +148,71 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
       const body = await context.req.json<ConversationStartInput>();
       return context.json(await runtime.startConversation(body), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
+  });
+
+  app.get('/generated-blueprints/:ticket/*', (context) => {
+    const now = Date.now();
+    for (const [id, value] of generatedBlueprintTickets) if (value.expiresAt <= now || value.requests >= 512) generatedBlueprintTickets.delete(id);
+    const ticketId = context.req.param('ticket');
+    const ticket = generatedBlueprintTickets.get(ticketId);
+    if (!ticket || ticket.expiresAt <= now || ticket.requests >= 512) return context.text('Generated blueprint preview expired', 404);
+    try {
+      const requestUrl = new URL(context.req.url);
+      const marker = `/generated-blueprints/${encodeURIComponent(ticketId)}/`;
+      if (!requestUrl.pathname.startsWith(marker)) throw new Error('生成应用预览路径无效');
+      const path = requestUrl.pathname.slice(marker.length).split('/').map((segment) => decodeURIComponent(segment)).join('/');
+      const asset = runtime.readGeneratedBlueprintAsset(ticket.blueprintId, path);
+      ticket.requests += 1;
+      const origin = requestUrl.origin;
+      const csp = [
+        "default-src 'none'", `script-src 'unsafe-inline' ${origin}`, `style-src 'unsafe-inline' ${origin}`,
+        `img-src ${origin} data: blob:`, `font-src ${origin} data:`, `media-src ${origin} data: blob:`,
+        `connect-src ${origin}`, `worker-src ${origin} blob:`, "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-src 'none'",
+        'frame-ancestors file: http://127.0.0.1:* http://localhost:*',
+        'sandbox allow-scripts allow-same-origin',
+      ].join('; ');
+      const headers = {
+        'Content-Type': asset.mediaType, 'Content-Length': String(asset.bytes.length), 'Content-Security-Policy': csp,
+        'Cache-Control': 'private, no-store, max-age=0', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
+        'Cross-Origin-Resource-Policy': 'cross-origin', 'Access-Control-Allow-Origin': '*', ETag: asset.etag,
+      };
+      if (context.req.header('if-none-match') === asset.etag) return context.body(null, 304, headers);
+      return context.body(asset.bytes as unknown as ArrayBuffer, 200, headers);
+    } catch (error) { return context.json(jsonError(error), 404); }
+  });
+
+  app.get('/resource-files/:ticket', (context) => {
+    const now = Date.now();
+    for (const [id, value] of resourceTickets) {
+      if (value.expiresAt > now && value.requests < 2_048) continue;
+      resourceTickets.delete(id);
+      runtime.releaseResource(value.resourceId);
+    }
+    const ticket = resourceTickets.get(context.req.param('ticket'));
+    if (!ticket || ticket.expiresAt <= now || ticket.requests >= 2_048) return context.text('Resource ticket expired', 404);
+    try {
+      const handle = runtime.resources.describe(ticket.resourceId);
+      const rangeHeader = context.req.header('range');
+      const match = rangeHeader?.match(/^bytes=(\d+)-(\d*)$/u);
+      if (rangeHeader && !match) return context.text('Unsupported range', 416);
+      const start = match ? Number(match[1]) : 0;
+      const requestedEnd = match?.[2] ? Number(match[2]) : Math.min(handle.size - 1, start + 1024 * 1024 - 1);
+      const end = Math.min(handle.size - 1, requestedEnd);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= handle.size || end - start + 1 > 1024 * 1024) return context.text('Invalid range', 416);
+      const bytes = runtime.resources.read(handle.id, start, end + 1);
+      ticket.requests += 1;
+      const partial = start !== 0 || end !== handle.size - 1;
+      return context.body(bytes as unknown as ArrayBuffer, partial ? 206 : 200, {
+        'Content-Type': handle.mediaType,
+        'Content-Length': String(bytes.length),
+        'Accept-Ranges': 'bytes',
+        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(handle.name)}`,
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+        'Referrer-Policy': 'no-referrer',
+        ETag: handle.etag,
+        ...(partial ? { 'Content-Range': `bytes ${start}-${end}/${handle.size}` } : {}),
+      });
+    } catch (error) { return context.json(jsonError(error), 404); }
   });
   app.post('/api/chat', async (context) => {
     try {
@@ -387,6 +455,16 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     } catch (error) { return context.json(jsonError(error), 404); }
   });
   app.delete('/api/resources/:id', (context) => { runtime.releaseResource(context.req.param('id')); return context.json({ ok: true }); });
+  app.post('/api/resources/:id/ticket', (context) => {
+    try {
+      const resource = runtime.resources.describe(context.req.param('id'));
+      const ticket = randomUUID();
+      const expiresAt = Math.min(Date.parse(resource.expiresAt), Date.now() + 10 * 60_000);
+      resourceTickets.set(ticket, { resourceId: resource.id, expiresAt, requests: 0 });
+      const requestUrl = new URL(context.req.url);
+      return context.json({ url: `${requestUrl.origin}/resource-files/${encodeURIComponent(ticket)}`, expiresAt: new Date(expiresAt).toISOString() }, 201);
+    } catch (error) { return context.json(jsonError(error), 404); }
+  });
   app.get('/api/jobs', (context) => context.json(runtime.listJobs()));
   app.post('/api/jobs', async (context) => {
     try {
@@ -488,6 +566,24 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     try { return context.json(runtime.archiveWorktable(context.req.param('id'))); }
     catch (error) { return context.json(jsonError(error), 400); }
   });
+  app.get('/api/toolchain-adapters', (context) => context.json({ adapters: runtime.toolchainAdapters.manifests(), runs: runtime.toolchainAdapters.runs() }));
+  app.post('/api/toolchain-adapters/:adapterId/operations/:operationId/run', async (context) => {
+    try {
+      const body = await context.req.json<{ values?: Record<string, JsonValue>; instanceId?: string; confirmed?: boolean }>();
+      return context.json(runtime.runToolchainAdapter({
+        adapterId: context.req.param('adapterId'), operationId: context.req.param('operationId'), values: body.values ?? {},
+        ...(body.instanceId ? { instanceId: body.instanceId } : {}), confirmed: body.confirmed === true,
+      }), 202);
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/toolchain-runs/:id/cancel', (context) => {
+    try { return context.json(runtime.cancelToolchainRun(context.req.param('id'))); }
+    catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.get('/api/toolchain-runs/:id/log', (context) => {
+    try { return context.json(runtime.toolchainRunLog(context.req.param('id'), Number(context.req.query('offset') ?? 0))); }
+    catch (error) { return context.json(jsonError(error), 404); }
+  });
   app.post('/api/worktable/instances/:id/restore', (context) => {
     try { return context.json(runtime.restoreWorktable(context.req.param('id'))); }
     catch (error) { return context.json(jsonError(error), 400); }
@@ -496,6 +592,19 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     try {
       const body = await context.req.json<Parameters<OpenLabRuntime['setWorktableLayout']>[1]>();
       return context.json(runtime.setWorktableLayout(context.req.param('id'), body));
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/workbench-v1/layout-proposals/:id/decision', async (context) => {
+    try {
+      const body = await context.req.json<{ accepted?: boolean; confirmed?: boolean }>();
+      if (!body.confirmed) throw new Error('布局新增、删除或重排必须在差异预览后由用户明确确认');
+      return context.json(runtime.decideWorkbenchLayoutProposal(context.req.param('id'), body.accepted === true));
+    } catch (error) { return context.json(jsonError(error), 409); }
+  });
+  app.post('/api/workbench-v1/instances/:id/layout-proposals', async (context) => {
+    try {
+      const body = await context.req.json<Omit<Parameters<OpenLabRuntime['proposeWorkbenchLayout']>[0], 'instanceId'>>();
+      return context.json(runtime.proposeWorkbenchLayout({ ...body, instanceId: context.req.param('id') }), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/worktable/instances/:id/panes/:paneId/tabs', async (context) => {
@@ -536,6 +645,38 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
   app.post('/api/browser/state', async (context) => {
     try { return context.json(runtime.syncBrowserState(await context.req.json<unknown>())); }
     catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.get('/api/generated-blueprints', (context) => context.json(runtime.generatedAppBlueprints.list()));
+  app.post('/api/generated-blueprints', async (context) => {
+    try {
+      const body = await context.req.json<{ prompt?: string }>();
+      return context.json(runtime.proposeGeneratedWorkbench(body.prompt ?? ''), 201);
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/generated-blueprints/:id/decision', async (context) => {
+    try {
+      const body = await context.req.json<{ accepted?: boolean; confirmed?: boolean }>();
+      if (!body.confirmed) throw new Error('生成应用的布局与能力声明需要用户明确确认');
+      return context.json(await runtime.decideGeneratedWorkbench(context.req.param('id'), body.accepted === true));
+    } catch (error) { return context.json(jsonError(error), 409); }
+  });
+  app.post('/api/generated-blueprints/:id/preview-ticket', (context) => {
+    try {
+      const blueprint = runtime.generatedAppBlueprints.get(context.req.param('id'));
+      if (blueprint.status !== 'preview') throw new Error('生成应用尚未通过构建检查');
+      const ticket = randomUUID();
+      const expiresAt = Date.now() + (options.generatedAppTicketTtlMs ?? 5 * 60_000);
+      generatedBlueprintTickets.set(ticket, { blueprintId: blueprint.id, expiresAt, requests: 0 });
+      const requestUrl = new URL(context.req.url);
+      return context.json({ url: `${requestUrl.origin}/generated-blueprints/${encodeURIComponent(ticket)}/${blueprint.entry}`, expiresAt: new Date(expiresAt).toISOString() }, 201);
+    } catch (error) { return context.json(jsonError(error), 404); }
+  });
+  app.post('/api/generated-blueprints/:id/accept', async (context) => {
+    try {
+      const body = await context.req.json<{ confirmed?: boolean }>();
+      if (!body.confirmed) throw new Error('接受并挂载生成应用需要用户明确确认');
+      return context.json(runtime.acceptGeneratedWorkbench(context.req.param('id'), true), 201);
+    } catch (error) { return context.json(jsonError(error), 409); }
   });
   app.get('/api/generated-apps', (context) => context.json(runtime.generatedApps.list()));
   app.post('/api/generated-apps', async (context) => {
@@ -628,7 +769,12 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
     } catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/settings/harness', async (context) => {
-    try { return context.json(runtime.setHarnessSettings(await context.req.json<Partial<HarnessSettings>>())); }
+    try {
+      const body = await context.req.json<Partial<HarnessSettings> & { confirmed?: boolean }>();
+      if (body.developerMode === true && body.confirmed !== true) throw new Error('开启开发者模式需要用户明确确认');
+      const { confirmed: _confirmed, ...patch } = body;
+      return context.json(await runtime.setHarnessSettings(patch));
+    }
     catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/terminal/previews/:id', async (context) => {
@@ -806,6 +952,21 @@ export async function startRuntimeServer(runtime: OpenLabRuntime, options: { hos
       const body = await context.req.json<{ sourcePath?: string; confirmed?: boolean }>();
       if (!body.confirmed || !body.sourcePath) throw new Error('读取外部插件清单需要本地文件选择确认');
       return context.json(runtime.inspectPluginSource(body.sourcePath));
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.get('/api/plugin-catalog', (context) => context.json({ status: runtime.pluginMarketplace.status(), entries: runtime.pluginMarketplace.entries() }));
+  app.post('/api/plugin-catalog/update-file', async (context) => {
+    try {
+      const body = await context.req.json<{ path?: string; confirmed?: boolean }>();
+      if (!body.confirmed || !body.path) throw new Error('更新离线策展目录需要用户选择并确认签名索引文件');
+      return context.json(await runtime.updatePluginCatalogFromFile(body.path));
+    } catch (error) { return context.json(jsonError(error), 400); }
+  });
+  app.post('/api/plugin-catalog/:id/install-file', async (context) => {
+    try {
+      const body = await context.req.json<{ path?: string; scope?: 'user' | 'project'; confirmed?: boolean }>();
+      if (!body.confirmed || !body.path) throw new Error('安装策展插件需要用户选择并确认离线包');
+      return context.json(await runtime.installCuratedPluginPackage(context.req.param('id'), body.path, body.scope ?? 'project'), 201);
     } catch (error) { return context.json(jsonError(error), 400); }
   });
   app.post('/api/plugins/:id/enabled', async (context) => {

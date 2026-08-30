@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 5 as const;
+export const PROTOCOL_VERSION = 6 as const;
 
 export type Id = string;
 export type JsonPrimitive = string | number | boolean | null;
@@ -6,6 +6,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 
 export type ScopeKind = 'app' | 'project' | 'session' | 'agent';
 export type ActorKind = 'user' | 'agent' | 'tool' | 'plugin' | 'system';
+export type ProjectRole = 'owner' | 'editor' | 'reviewer' | 'viewer';
 
 export interface EventActor {
   id: Id;
@@ -21,6 +22,15 @@ export interface RuntimeEventEnvelope<TPayload extends JsonValue = JsonValue> {
   schemaVersion: number;
   timestamp: string;
   actor: EventActor;
+  /** Stable installation identity. It is deliberately distinct from a user
+   * identity so a future sync service can distinguish offline devices. */
+  deviceId: Id;
+  /** Stable command/event key used to collapse retries without comparing
+   * wall-clock timestamps. */
+  idempotencyKey: Id;
+  /** Optimistic entity revision. For stream events this is the stream
+   * sequence unless a domain service supplies a narrower entity revision. */
+  revision: number;
   agentId?: Id;
   traceId: Id;
   provenanceRefs: Id[];
@@ -758,7 +768,35 @@ export type PluginPermission =
   | 'browser:interact'
   | 'generated-apps:publish';
 
-export type PluginApiVersion = 1 | 2 | 3;
+/** Capabilities exposed by the Harness Plugin API v4. */
+export type HarnessPluginPermissionV4 =
+  | 'settings:read'
+  | 'ui'
+  | 'workspace:read'
+  | 'workspace:edit'
+  | 'resources:read'
+  | 'jobs:run'
+  | 'models:invoke'
+  | 'annotations:read'
+  | 'annotations:write'
+  | 'artifacts:write'
+  | 'research:read'
+  | 'research:write'
+  | 'plugin-storage'
+  | 'browser:observe'
+  | 'browser:interact'
+  | 'documents:read'
+  | 'evidence:read'
+  | 'evidence:write'
+  | 'artifacts:publish'
+  | 'workbench:read'
+  | 'workbench:write'
+  | 'workbench:mount'
+  | 'workbench:propose-layout'
+  | 'generated-apps:build'
+  | 'toolchains:execute';
+
+export type PluginApiVersion = 1 | 2 | 3 | 4;
 
 export interface ResearchObjectSchemaContribution {
   type: `${string}:${string}`;
@@ -768,6 +806,20 @@ export interface ResearchObjectSchemaContribution {
     titleProperty?: string;
     summaryProperties?: string[];
   };
+}
+
+export interface PluginSurfaceContributionV1 {
+  id: string;
+  title: string;
+  entry: string;
+  kind: 'pdf-reader' | 'knowledge-graph' | 'drawing-canvas' | 'custom';
+  allowedHostCapabilities: string[];
+}
+
+export interface ArtifactRendererContributionV1 {
+  id: string;
+  artifactKinds: string[];
+  entry: string;
 }
 
 export interface PluginContributionManifest {
@@ -783,11 +835,16 @@ export interface PluginContributionManifest {
   uiPanels?: Array<{ id: string; title: string; entry: string; tools?: string[] }>;
   workbenches?: WorkbenchContribution[];
   worktableTemplates?: WorktableTemplateContribution[];
+  workbenchBlueprints?: WorkbenchBlueprintV1[];
+  workflows?: PluginWorkflowDefinition[];
+  surfaces?: PluginSurfaceContributionV1[];
+  artifactRenderers?: ArtifactRendererContributionV1[];
+  toolchainAdapters?: ToolchainAdapterManifestV1[];
   researchObjectSchemas?: ResearchObjectSchemaContribution[];
 }
 
 export interface PluginManifest {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   /** Missing on legacy manifests and therefore interpreted as Plugin API v1. */
   apiVersion?: PluginApiVersion;
   id: string;
@@ -795,8 +852,14 @@ export interface PluginManifest {
   version: string;
   engine: string;
   entry: string;
-  permissions: PluginPermission[];
+  permissions: Array<PluginPermission | HarnessPluginPermissionV4>;
   contributes: PluginContributionManifest;
+}
+
+export interface HarnessPluginManifestV4 extends PluginManifest {
+  schemaVersion: 4;
+  apiVersion: 4;
+  permissions: HarnessPluginPermissionV4[];
 }
 
 export interface PluginWorkflowDefinition {
@@ -846,9 +909,17 @@ export interface ProjectSummary {
 export interface HarnessSettings {
   defaultAgentModel: string;
   utilityModel: string;
+  /** Dedicated text model used by the source-grounded paper-reader pipeline. */
+  paperReaderTextModel: string;
+  /** Dedicated vision model used only for figure/table verification. An empty
+   * value means that the host could not resolve a vision-capable model. */
+  paperReaderVisionModel: string;
   maxConcurrentAgentRuns: number;
   defaultAgentContextBudget: number;
   delegatedAgentContextBudget: number;
+  /** Allows unsigned local directory/ZIP plugins. Curated signed packages do
+   * not require this mode. It is deliberately off by default. */
+  developerMode: boolean;
   securityPolicy: SecurityApprovalPolicy;
 }
 
@@ -1490,7 +1561,8 @@ export interface WorkbenchState {
   };
 }
 
-/** Top-level application mode. The legacy Workbench is projected into worktable instances. */
+/** Top-level renderer mode. `worktable` is a private route token; Plugin API v4
+ * exposes only Workbench-named contracts. */
 export type AppMode = 'chat' | 'worktable' | 'channels';
 
 export type WorktableBuiltinKind =
@@ -1622,6 +1694,616 @@ export interface WorktableDeviceUiState {
   openInstanceIds?: Id[];
 }
 
+/** Public Harness Workbench v1 contracts. The current Worktable engine is an
+ * implementation detail; plugins and generated applications use these names. */
+export const WORKBENCH_BLUEPRINT_VERSION = 1 as const;
+
+export interface ResourceRevisionRef {
+  id: Id;
+  projectId: Id;
+  document: DocumentRevisionRef;
+  createdAt: string;
+}
+
+export interface ArtifactRevisionRef {
+  artifactId: Id;
+  revisionId: Id;
+}
+
+export interface EvidenceAnchorV1 {
+  id: Id;
+  projectId: Id;
+  target: DocumentRevisionRef;
+  /** One-based PDF page when the source has stable pages. */
+  page?: number;
+  /** Stable extractor block identity. */
+  blockId?: string;
+  selector: AnnotationSelector;
+  asset?: { kind: 'figure' | 'table' | 'formula'; id: string };
+  exact?: string;
+  createdAt: string;
+}
+
+/** Revision-bound paper anchor used by the V2 fine-reading pipeline. It keeps
+ * the V1 selector shape so existing PDF reveal consumers continue to work. */
+export interface EvidenceAnchorV2 extends EvidenceAnchorV1 {
+  schemaVersion: 2;
+  paperId: Id;
+  documentId: Id;
+  revisionHash: string;
+  canonicalUri: string;
+  sourceKind: 'block' | 'figure' | 'table' | 'formula';
+}
+
+export interface AnnotationV1 extends Annotation {
+  schemaVersion: 1;
+  revision: number;
+  evidenceAnchorIds: Id[];
+}
+
+export type WorkbenchSlotRole =
+  | 'primary'
+  | 'source'
+  | 'analysis'
+  | 'evidence'
+  | 'tasks'
+  | 'review'
+  | 'output'
+  | `${string}:${string}`;
+
+export interface WorkbenchSlotV1 {
+  id: string;
+  role: WorkbenchSlotRole;
+  paneId: string;
+  title: string;
+  accepts: Array<WorktableContent['kind']>;
+  /** Only declared automatic slots may receive a MountIntent without a layout
+   * confirmation. */
+  autoMount: boolean;
+}
+
+export interface WorkbenchBlueprintV1 {
+  schemaVersion: typeof WORKBENCH_BLUEPRINT_VERSION;
+  id: string;
+  version: string;
+  title: string;
+  description?: string;
+  icon?: string;
+  pluginId?: string;
+  kind: 'research' | 'generated';
+  inputSchema: JsonSchema;
+  inputUi?: WorktableInputUi;
+  layout: WorktableSplitNode;
+  panes: WorktablePane[];
+  slots: WorkbenchSlotV1[];
+  commands: string[];
+}
+
+export interface WorkbenchInstanceV1 extends WorktableInstance {
+  schemaVersion: 1;
+  blueprintId: string;
+  blueprintVersion: string;
+  primaryConversationId?: Id;
+  slots: WorkbenchSlotV1[];
+}
+
+export interface WorkbenchDeviceStateV1 extends WorktableDeviceUiState {
+  schemaVersion: 1;
+  instanceId: Id;
+  deviceId: Id;
+}
+
+export interface MountIntentV1 {
+  schemaVersion: 1;
+  idempotencyKey: Id;
+  instanceId: Id;
+  targetRole: WorkbenchSlotRole;
+  artifact: ArtifactRevisionRef;
+  title?: string;
+  presentation?: { rendererId?: string; role?: ArtifactFileRole };
+}
+
+export interface LayoutProposalV1 {
+  schemaVersion: 1;
+  id: Id;
+  instanceId: Id;
+  baseRevision: number;
+  title: string;
+  reason: string;
+  layout: WorktableSplitNode;
+  panes: WorktablePane[];
+  slots: WorkbenchSlotV1[];
+  status: 'pending' | 'accepted' | 'rejected' | 'stale';
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface RunRecordV1 {
+  id: Id;
+  projectId: Id;
+  instanceId: Id;
+  primaryConversationId?: Id;
+  kind: 'agent' | 'model' | 'workflow' | 'toolchain';
+  status: JobStatus | AgentRunStatus;
+  progress?: number;
+  stage?: string;
+  inputRefs: Id[];
+  outputRefs: Id[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewRequestV1 {
+  id: Id;
+  projectId: Id;
+  instanceId: Id;
+  runId?: Id;
+  title: string;
+  description: string;
+  artifact?: ArtifactRevisionRef;
+  evidenceAnchorIds: Id[];
+  requiredRole: Extract<ProjectRole, 'owner' | 'editor' | 'reviewer'>;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  requestedBy: EventActor;
+  decidedBy?: EventActor;
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface GeneratedAppBlueprintV1 {
+  schemaVersion: 1;
+  id: Id;
+  projectId: Id;
+  title: string;
+  prompt: string;
+  workbench: WorkbenchBlueprintV1;
+  entry: string;
+  hostCapabilities: string[];
+  networkDomains: string[];
+  generationSpec?: JsonValue;
+  modelGenerationIds?: Id[];
+  artifact?: ArtifactRevisionRef;
+  buildLog?: string;
+  error?: string;
+  status: 'draft' | 'awaiting_confirmation' | 'building' | 'preview' | 'accepted' | 'rejected' | 'failed';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ToolchainAdapterOperationV1 {
+  id: string;
+  title: string;
+  inputSchema: JsonSchema;
+  outputs: JobOutputSpec[];
+  requiresConfirmation: boolean;
+}
+
+export interface ToolchainAdapterManifestV1 {
+  schemaVersion: 1;
+  id: string;
+  version: string;
+  title: string;
+  platforms: Array<'win32'>;
+  executableNames: string[];
+  versionArgs: string[];
+  operations: ToolchainAdapterOperationV1[];
+}
+
+export interface ToolRunV1 {
+  id: Id;
+  projectId: Id;
+  adapterId: string;
+  operationId: string;
+  jobId: Id;
+  status: JobStatus;
+  artifactRevisionIds: Id[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PaperReaderStatusV1 =
+  | 'unconfigured'
+  | 'ready'
+  | 'inspecting'
+  | 'parsing'
+  | 'analyzing'
+  | 'completed'
+  | 'unsupported_scanned'
+  | 'interrupted'
+  | 'failed';
+
+export interface PaperReaderBatchAuthorizationV1 {
+  schemaVersion: 1;
+  id: Id;
+  instanceId: Id;
+  documentSha256: string;
+  model: string;
+  scope: 'full_text_translation_and_analysis';
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+  maximumTotalTokens: number;
+  modelCallLimit: number;
+  completedModelCalls: number;
+  consumedTokens: number;
+  status: 'active' | 'completed' | 'revoked' | 'exhausted';
+  actorId: Id;
+  authorizedAt: string;
+  updatedAt: string;
+}
+
+/** Small, replayable state kept in the shared event log. Parsed page content is
+ * revision-bound job output and is loaded only by the sandbox panel that needs
+ * it, instead of being duplicated into every bootstrap snapshot. */
+export interface PaperReaderInstanceV1 {
+  schemaVersion: 1;
+  instanceId: Id;
+  projectId: Id;
+  mainDocument?: DocumentRevisionRef;
+  supportingDocument?: DocumentRevisionRef;
+  status: PaperReaderStatusV1;
+  stage: string;
+  progress: number;
+  inspectionJobId?: Id;
+  supportingInspectionJobId?: Id;
+  parseJobId?: Id;
+  supportingParseJobId?: Id;
+  runId?: Id;
+  parsedDocument?: WorkspacePathRef;
+  supportingParsedDocument?: WorkspacePathRef;
+  reportArtifact?: ArtifactRevisionRef;
+  blockCount: number;
+  figureCount: number;
+  evidenceAnchorIds: Id[];
+  conclusionCount: number;
+  termCount: number;
+  generationVersion: number;
+  /** The one explicit, revision-scoped approval that covers every model call
+   * in this full-paper run. It cannot be reused for another PDF revision. */
+  batchAuthorization?: PaperReaderBatchAuthorizationV1;
+  inspectedTextCharacters?: number;
+  inspectedPageCount?: number;
+  supportingInspectedTextCharacters?: number;
+  supportingInspectedPageCount?: number;
+  translationBlockCount?: number;
+  translatedBlockCount?: number;
+  modelGenerationIds?: Id[];
+  autoFollow: boolean;
+  activeBlockId?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PaperReaderDocumentRoleV2 = 'main' | 'supplementary';
+
+export type PaperReaderPipelineStageV2 =
+  | 'document-profile'
+  | 'terminology'
+  | 'bilingual-translation'
+  | 'section-digest'
+  | 'figure-analysis'
+  | 'formula-analysis'
+  | 'claim-evidence'
+  | 'reproduction'
+  | 'synthesis'
+  | 'quality-gate';
+
+export type PaperReaderModuleV2 = Exclude<PaperReaderPipelineStageV2, 'document-profile' | 'quality-gate'>;
+
+export interface PaperDocumentV2 {
+  schemaVersion: 2;
+  id: Id;
+  paperId: Id;
+  role: PaperReaderDocumentRoleV2;
+  label: string;
+  revision: DocumentRevisionRef;
+  inspectionJobId?: Id;
+  parseJobId?: Id;
+  parsedDocument?: WorkspacePathRef;
+  parseState: 'pending' | 'inspecting' | 'parsing' | 'ready' | 'unsupported_scanned' | 'failed';
+  pageCount?: number;
+  textCharacters?: number;
+  blockCount?: number;
+  figureCount?: number;
+  formulaCount?: number;
+  warnings: string[];
+}
+
+export interface PaperReaderUsageBudgetV2 {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  modelCalls: number;
+}
+
+export interface PaperReaderBatchAuthorizationV2 {
+  schemaVersion: 2;
+  id: Id;
+  instanceId: Id;
+  documentSetHash: string;
+  textModel: string;
+  visionModel?: string;
+  modules: PaperReaderModuleV2[];
+  estimated: PaperReaderUsageBudgetV2;
+  maximum: PaperReaderUsageBudgetV2;
+  consumed: PaperReaderUsageBudgetV2;
+  status: 'active' | 'completed' | 'revoked' | 'exhausted';
+  actorId: Id;
+  authorizedAt: string;
+  updatedAt: string;
+}
+
+export interface PaperReaderUnitV2 {
+  schemaVersion: 2;
+  id: Id;
+  instanceId: Id;
+  stage: PaperReaderPipelineStageV2;
+  key: string;
+  inputHash: string;
+  dependencyHashes: string[];
+  documentId?: Id;
+  blockIds: string[];
+  assetId?: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'invalidated' | 'skipped';
+  attempts: number;
+  generationIds: Id[];
+  outputRef?: WorkspacePathRef;
+  outputSha256?: string;
+  usage: ModelUsage;
+  error?: string;
+  updatedAt: string;
+}
+
+export interface PaperReaderCheckpointV2 {
+  schemaVersion: 2;
+  id: Id;
+  instanceId: Id;
+  unitId: Id;
+  stage: PaperReaderPipelineStageV2;
+  inputHash: string;
+  dependencyHashes: string[];
+  outputRef: WorkspacePathRef;
+  outputSha256: string;
+  generationIds: Id[];
+  usage: ModelUsage;
+  createdAt: string;
+}
+
+export interface PaperReaderQuantityV2 {
+  value: string;
+  unit?: string;
+  condition?: string;
+  comparator?: string;
+  evidenceAnchorIds: Id[];
+}
+
+export type PaperReaderStatementTypeV2 = 'source-fact' | 'author-interpretation' | 'reader-inference' | 'hypothesis';
+
+export interface PaperReaderStatementV2 {
+  id: Id;
+  text: string;
+  type: PaperReaderStatementTypeV2;
+  confidence: 'high' | 'medium' | 'low';
+  evidenceAnchorIds: Id[];
+  quantities: PaperReaderQuantityV2[];
+}
+
+export interface PaperReaderSectionDigestV2 {
+  id: Id;
+  documentId: Id;
+  heading: string;
+  blockIds: string[];
+  summary: PaperReaderStatementV2[];
+  argumentativeFunction?: string;
+}
+
+export interface PaperReaderFigureAnalysisV2 {
+  id: Id;
+  documentId: Id;
+  figureId: string;
+  kind: 'figure' | 'table';
+  status: 'verified' | 'needs_review' | 'failed';
+  purpose: string;
+  panelObservations: string[];
+  axesAndVariables: string[];
+  controls: string[];
+  quantitativeResults: PaperReaderQuantityV2[];
+  authorInterpretation: PaperReaderStatementV2[];
+  independentJudgment: PaperReaderStatementV2[];
+  limitations: PaperReaderStatementV2[];
+  linkedClaimIds: Id[];
+  evidenceAnchorIds: Id[];
+  error?: string;
+}
+
+/** Clean bibliographic metadata transcribed from a rendered title page. Raw
+ * extractor fragments remain internal evidence and are never projected as
+ * individual user-facing fields. */
+export interface PaperReaderDocumentProfileV2 {
+  id: Id;
+  documentId: Id;
+  title: string;
+  authors: string[];
+  affiliations: string[];
+  journal?: string;
+  articleType?: string;
+  doi?: string;
+  publicationDate?: string;
+  abstract?: string;
+  confidence: 'high' | 'medium' | 'low';
+  status: 'verified' | 'needs_review' | 'failed';
+  sourceImageSha256?: string;
+  generationId?: Id;
+  warnings: string[];
+}
+
+export interface PaperReaderFormulaAnalysisV2 {
+  id: Id;
+  documentId: Id;
+  formulaId: string;
+  status: 'verified' | 'needs_review' | 'failed';
+  /** Visually transcribed LaTeX. The source crop is authoritative. */
+  expression: string;
+  sourceExpression: string;
+  ambiguousSymbols: string[];
+  sourceTextAgreement: 'consistent' | 'text_layer_incomplete' | 'conflict';
+  variables: Array<{ symbol: string; meaning: string }>;
+  assumptions: string[];
+  purpose: string;
+  applicability: string[];
+  evidenceAnchorIds: Id[];
+  error?: string;
+}
+
+export interface PaperReaderReproductionV2 {
+  materials: PaperReaderStatementV2[];
+  preparation: PaperReaderStatementV2[];
+  instruments: PaperReaderStatementV2[];
+  parameters: PaperReaderStatementV2[];
+  controls: PaperReaderStatementV2[];
+  statistics: PaperReaderStatementV2[];
+  conditions: PaperReaderStatementV2[];
+  missingInformation: PaperReaderStatementV2[];
+}
+
+export interface PaperReaderCoverageV2 {
+  documentProfileCount?: number;
+  verifiedDocumentProfileCount?: number;
+  substantiveBlockCount: number;
+  digestedBlockCount: number;
+  translatedBlockCount: number;
+  mainVisualCount: number;
+  verifiedMainVisualCount: number;
+  referencedSupplementaryVisualCount: number;
+  analyzedSupplementaryVisualCount: number;
+  formulaCount: number;
+  analyzedFormulaCount: number;
+}
+
+export interface PaperReaderQualityV2 {
+  status: 'complete' | 'incomplete' | 'failed';
+  schemaValid: boolean;
+  anchorsValid: boolean;
+  quantitiesValid: boolean;
+  documentProfileComplete?: boolean;
+  textCoverageComplete: boolean;
+  translationCoverageComplete: boolean;
+  visualCoverageComplete: boolean;
+  formulaCoverageComplete: boolean;
+  issues: string[];
+}
+
+export interface FineReadingReportV2 {
+  schema: 'openscientific.fine-reading-report/2';
+  paperId: Id;
+  documentSetHash: string;
+  documentProfiles?: PaperReaderDocumentProfileV2[];
+  thesis: PaperReaderStatementV2[];
+  researchQuestion: PaperReaderStatementV2[];
+  strategy: PaperReaderStatementV2[];
+  evidenceChain: PaperReaderStatementV2[];
+  mechanism: PaperReaderStatementV2[];
+  keyResults: PaperReaderStatementV2[];
+  contributions: PaperReaderStatementV2[];
+  limitations: PaperReaderStatementV2[];
+  unproven: PaperReaderStatementV2[];
+  reproduction: PaperReaderReproductionV2;
+  figures: PaperReaderFigureAnalysisV2[];
+  formulas: PaperReaderFormulaAnalysisV2[];
+  researchImplications: PaperReaderStatementV2[];
+  presentationBrief: string[];
+  coverage: PaperReaderCoverageV2;
+  quality: PaperReaderQualityV2;
+  directionOutput: PaperReaderStatementV2[];
+  sectionDigests: PaperReaderSectionDigestV2[];
+  generatedAt: string;
+}
+
+export interface PaperReaderPipelineStateV2 {
+  stage: PaperReaderPipelineStageV2;
+  totalUnits: number;
+  completedUnits: number;
+  failedUnits: number;
+  units: PaperReaderUnitV2[];
+}
+
+/** V2 is the only execution state for new runs. Deprecated V1 projections are
+ * retained so old renderer builds and persisted events remain readable. */
+export interface PaperReaderInstanceV2 {
+  schemaVersion: 2;
+  instanceId: Id;
+  projectId: Id;
+  paperId: Id;
+  documents: PaperDocumentV2[];
+  documentSetHash: string;
+  status: PaperReaderStatusV1 | 'stale';
+  stage: string;
+  progress: number;
+  pipeline: PaperReaderPipelineStateV2;
+  runId?: Id;
+  reportArtifact?: ArtifactRevisionRef;
+  quality?: PaperReaderQualityV2;
+  batchAuthorization?: PaperReaderBatchAuthorizationV2;
+  modelGenerationIds: Id[];
+  evidenceAnchorIds: Id[];
+  generationVersion: number;
+  autoFollow: boolean;
+  activeBlockId?: string;
+  activeDocumentId?: Id;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Deprecated compatibility projection; never used as V2 source of truth. */
+  mainDocument?: DocumentRevisionRef;
+  supportingDocument?: DocumentRevisionRef;
+  parsedDocument?: WorkspacePathRef;
+  supportingParsedDocument?: WorkspacePathRef;
+  blockCount: number;
+  figureCount: number;
+  conclusionCount: number;
+  termCount: number;
+  translationBlockCount: number;
+  translatedBlockCount: number;
+  inspectedTextCharacters?: number;
+  inspectedPageCount?: number;
+}
+
+export type PaperReaderInstance = PaperReaderInstanceV1 | PaperReaderInstanceV2;
+
+export interface CuratedPluginCatalogEntryV1 {
+  id: string;
+  version: string;
+  name: string;
+  description: string;
+  packageUrl: string;
+  sha256: string;
+  permissions: HarnessPluginPermissionV4[];
+  publishedAt: string;
+}
+
+export interface CuratedPluginRevocationV1 {
+  id: string;
+  version?: string;
+  reason: string;
+  revokedAt: string;
+}
+
+export interface CuratedPluginCatalogIndexV1 {
+  schemaVersion: 1;
+  sequence: number;
+  generatedAt: string;
+  entries: CuratedPluginCatalogEntryV1[];
+  revocations: CuratedPluginRevocationV1[];
+}
+
+export interface SignedPluginCatalogV1 {
+  keyId: string;
+  algorithm: 'Ed25519';
+  index: CuratedPluginCatalogIndexV1;
+  signature: string;
+}
+
 export interface WorktableContextSnapshot {
   instanceId: Id;
   title: string;
@@ -1745,15 +2427,25 @@ export interface BootstrapSnapshot {
   workbenchContributions: WorkbenchContribution[];
   worktable: WorktableState;
   worktableTemplates: WorktableTemplateContribution[];
+  workbenchBlueprints: WorkbenchBlueprintV1[];
+  workbenchInstances: WorkbenchInstanceV1[];
+  layoutProposals: LayoutProposalV1[];
+  evidenceAnchors: EvidenceAnchorV1[];
+  runRecords: RunRecordV1[];
+  reviewRequests: ReviewRequestV1[];
   browserProfiles: BrowserProfileSummary[];
   browserSessions: BrowserSessionSummary[];
   generatedApps: GeneratedWorktableApp[];
+  generatedAppBlueprints: GeneratedAppBlueprintV1[];
   annotations: Annotation[];
   annotationSets: AnnotationSet[];
   artifactRevisions: ArtifactRevision[];
   sourceMaps: SourceMapDescriptor[];
   jobs: JobRecord[];
   toolchains: ToolchainDescriptor[];
+  toolchainAdapters: ToolchainAdapterManifestV1[];
+  toolRuns: ToolRunV1[];
+  paperReaders: PaperReaderInstance[];
   agentDefinitions: AgentDefinition[];
   agentTemplates: AgentTemplate[];
   projectAgents: ProjectAgentBinding[];
@@ -1773,6 +2465,10 @@ export interface BootstrapSnapshot {
   skills: SkillDescriptor[];
   mcpServers: McpServerState[];
   plugins: Array<{ manifest: PluginManifest; enabled: boolean; trusted: boolean; integrity: 'verified' | 'unlocked' | 'mismatch'; error?: string; settings: JsonValue }>;
+  pluginCatalog: {
+    status: { source: 'cache' | 'empty'; sequence: number; generatedAt?: string; error?: string };
+    entries: CuratedPluginCatalogEntryV1[];
+  };
   pendingApprovals: ApprovalRequest[];
   providers: ModelProviderState[];
   models: ModelDescriptor[];
@@ -1791,15 +2487,20 @@ export type ServerPushMessage =
   | { type: 'workspace-edits.changed'; previews: WorkspaceEditPreview[]; groups: WorkspaceEditGroup[] }
   | { type: 'workbench.changed'; workbench: WorkbenchState; contributions: WorkbenchContribution[] }
   | { type: 'worktable.changed'; worktable: WorktableState; templates: WorktableTemplateContribution[] }
+  | { type: 'workbench-v1.changed'; blueprints: WorkbenchBlueprintV1[]; instances: WorkbenchInstanceV1[]; proposals: LayoutProposalV1[] }
+  | { type: 'scientific-kernel.changed'; evidenceAnchors: EvidenceAnchorV1[]; runs: RunRecordV1[]; reviews: ReviewRequestV1[] }
   | { type: 'browser.changed'; profiles: BrowserProfileSummary[]; sessions: BrowserSessionSummary[] }
   | { type: 'terminal.changed'; instanceId: Id; paneId: Id; status: 'idle' | 'running' | 'interrupted' | 'closed' }
   | { type: 'scm.changed'; instanceId: Id; revision: number }
   | { type: 'generated-app.changed'; apps: GeneratedWorktableApp[] }
+  | { type: 'generated-blueprints.changed'; blueprints: GeneratedAppBlueprintV1[] }
   | { type: 'annotations.changed'; annotations: Annotation[]; annotationSets: AnnotationSet[] }
   | { type: 'artifact-revisions.changed'; revisions: ArtifactRevision[] }
   | { type: 'source-maps.changed'; sourceMaps: SourceMapDescriptor[] }
   | { type: 'jobs.changed'; jobs: JobRecord[] }
   | { type: 'toolchains.changed'; toolchains: ToolchainDescriptor[] }
+  | { type: 'tool-runs.changed'; adapters: ToolchainAdapterManifestV1[]; runs: ToolRunV1[] }
+  | { type: 'paper-readers.changed'; readers: PaperReaderInstance[] }
   | { type: 'capabilities.changed'; revision: number; reason: string }
   | { type: 'providers.changed'; providers: ModelProviderState[]; models: ModelDescriptor[] }
   | { type: 'agent-definitions.changed'; definitions: AgentDefinition[]; projectAgents: ProjectAgentBinding[] }

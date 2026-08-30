@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -54,13 +55,17 @@ mkdirSync(userDataRoot, { recursive: true });
 mkdirSync(artifactRoot, { recursive: true });
 writeFileSync(join(externalRoot, 'external-evidence.md'), '# External evidence\ntraceable', 'utf8');
 writeFileSync(join(externalRoot, 'preview.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP4z8DAwMDAxMDAwMAAAAQAAf8CBt0AAAAASUVORK5CYII=', 'base64'));
-writeFileSync(join(externalRoot, 'preview.pdf'), createPdfFixture());
+const pdfFixture = createPdfFixture();
+writeFileSync(join(externalRoot, 'preview.pdf'), pdfFixture);
+writeFileSync(join(projectRoot, 'e2e-paper.pdf'), pdfFixture);
+writeFileSync(join(projectRoot, 'e2e-si.pdf'), pdfFixture);
 writeFileSync(join(externalRoot, 'preview.docx'), Buffer.from('UEsDBBQAAAAIAJy7G133S4B1xgAAAHYBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbH2QTU7DQAyFrxLNFnVcsWCBmm6ALbDgAtbESUaM7dHYLeH2KKV0gQrr9/M9vd3bZyXrFi5ifZjd6z2ApZkYLWolWbiM2hjdorYJKqZ3nAhut9s7SCpO4htfO8J+90gjHop3T4uTWFbpQ6NioXv4Nq6sPmCtJSf0rAJHGX5RNmdCbFROHptztZuFS4CrhFX5G3DOvRyptTxQ94rNn5GpD/ChbYBB04FJPP5fc2WnjmNOdMmvbbVpIrMsE5d4URiz/OyH0937L1BLAwQUAAAACACcuxtdYXsvQ4oAAADyAAAACwAAAF9yZWxzLy5yZWxzjc8xDgIhEAXQq5A5wM5qYWGAymZbsxcgMLsQgSGAcb29jcVqLGx/ft7Pl1eKpgfOzYfSxJZibgp87+WM2KynZNrAhfKW4sI1md4GrisWY29mJTyO4wnr3gAt96aYnII6uQOI+VnoH5uXJVi6sL0nyv3HxFcDxGzqSl3Bg6tD946HLUVALfHjon4BUEsDBBQAAAAIAJy7G11xvzBytAAAABABAAARAAAAd29yZC9kb2N1bWVudC54bWxtkDEPgjAQhf9Kww+g6ODQAIsODiaSOOha2xMb2x65Vgr/3gAGF5f3hvvu3cuVSWhUbwc+ssFZH0SqsmeMneA8qCc4GXLswA/OPpCcjCFHanlC0h2hghCMb53l26LYcSeNz+oyiTvqcfJuloZmu8TRAkuil7bKjiC18e0m43XJV2aWWF+RNGsIegNpmsaZoYVcc7/wCZW07HDe3xiB10DGtywhvUL+dzeAig0tZ5ee/PeD+gNQSwECFAAUAAAACACcuxtd90uAdcYAAAB2AQAAEwAAAAAAAAAAAAAAgAEAAAAAW0NvbnRlbnRfVHlwZXNdLnhtbFBLAQIUABQAAAAIAJy7G11hey9DigAAAPIAAAALAAAAAAAAAAAAAACAAfcAAABfcmVscy8ucmVsc1BLAQIUABQAAAAIAJy7G11xvzBytAAAABABAAARAAAAAAAAAAAAAACAAaoBAAB3b3JkL2RvY3VtZW50LnhtbFBLBQYAAAAAAwADALkAAACNAgAAAAA=', 'base64'));
 writeFileSync(join(additionalProjectRoot, 'dataset-notes.md'), '# Bound dataset folder\nproject-wide', 'utf8');
 writeFileSync(join(projectRoot, 'research-notes', 'overview.md'), '# Recognized project note\nvisible in the workspace tree', 'utf8');
 
 let callSequence = 0;
 let persistentMemberIds = [];
+const rendererConsoleErrors = [];
 
 const semanticRoles = ['neutral', 'accent', 'success', 'warning', 'danger', 'info'];
 const semanticPalettes = {
@@ -295,12 +300,17 @@ async function launch() {
   page.setDefaultTimeout(30_000);
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
+    rendererConsoleErrors.push(message.text());
     const location = message.location();
     const source = location.url ? ` (${location.url}:${location.lineNumber ?? 0}:${location.columnNumber ?? 0})` : '';
     process.stderr.write(`[renderer console] ${message.text()}${source}\n`);
   });
   page.on('pageerror', (error) => process.stderr.write(`[renderer pageerror] ${error.message}\n`));
-  await page.locator('.app-mode-chat [data-testid="composer-input"]').waitFor();
+  await page.waitForFunction(() => {
+    const chat = document.querySelector('.app-mode-chat [data-testid="composer-input"]');
+    const worktable = document.querySelector('[data-testid="worktable-shell"]');
+    return (chat instanceof HTMLElement && chat.getClientRects().length > 0) || (worktable instanceof HTMLElement && worktable.getClientRects().length > 0);
+  });
   return { application, page };
 }
 
@@ -396,7 +406,7 @@ try {
     assert.ok(readerRuntime, 'packaged app must register the bundled offline Reader Runtime');
     assert.equal(readerRuntime.status, 'available');
     assert.equal(readerRuntime.source, 'bundled');
-    assert.equal(readerRuntime.workerVersion, '0.2.19');
+    assert.equal(readerRuntime.workerVersion, '0.2.23');
     assert.equal(readerRuntime.capabilities.includes('pdf-inspect'), true);
     assert.equal(readerRuntime.capabilities.includes('docling-structure'), true);
   }
@@ -419,6 +429,27 @@ try {
   assert.equal(namedSnapshot.agentDefinitions[0].name, 'E2E 研究搭档');
   assert.equal(namedSnapshot.agentRuns.length, 1);
   assert.equal(namedSnapshot.agentRuns[0].role, 'lead');
+  assert.equal(namedSnapshot.sessionCatalog.length, 0, 'first Agent setup must not persist an automatic conversation');
+  assert.equal(namedSnapshot.sessions.filter((session) => !session.temporary).length, 0, 'the runtime may keep only a transient internal session before the user creates a conversation');
+  await page.locator('.conversation-pane.is-draft-conversation').waitFor();
+  assert.equal(await page.locator('.session-item').count(), 0, 'the sidebar stays empty after first Agent setup');
+  await page.getByTestId('new-conversation').click();
+  assert.equal((await snapshot(page)).sessionCatalog.length, 0, 'opening the composer draft alone must not create a persisted conversation');
+  await page.screenshot({ path: join(artifactRoot, packaged ? 'first-agent-empty-draft-packaged.png' : 'first-agent-empty-draft.png') });
+
+  // Seed one explicitly-created empty conversation for the rest of the broad UI
+  // suite. The first-run assertions above have already verified the production UX.
+  const seededSession = await runtimeJson(page, '/api/sessions', {
+    title: 'E2E 用户创建会话',
+    leadAgentId: namedSnapshot.agentDefinitions[0].id,
+    memberAgentIds: [],
+    temporary: false,
+  });
+  await page.getByTestId('refresh-snapshot').click();
+  const seededSessionItem = page.locator(`[data-session-id="${seededSession.id}"] .session-item__main`);
+  await seededSessionItem.waitFor();
+  await seededSessionItem.click();
+  await page.locator('.conversation-pane.is-draft-conversation').waitFor({ state: 'detached' });
 
   await page.getByTestId('sidebar-profile-trigger').click();
   assert.equal((await page.getByTestId('sidebar-profile-trigger').locator('.sidebar-profile-name').innerText()).trim(), '用户', 'left profile strip shows only the user name');
@@ -821,6 +852,7 @@ try {
   await projectContextMenu.getByRole('menuitem', { name: '管理文件夹', exact: true }).click();
   const manageProjectFoldersDialog = page.getByTestId('create-project-dialog');
   await manageProjectFoldersDialog.waitFor();
+  await manageProjectFoldersDialog.locator('.create-project-folder-row').first().waitFor();
   assert.equal(await manageProjectFoldersDialog.locator('.create-project-folder-row').count(), 1, 'an existing project starts with its primary folder in the folder manager');
   assert.equal(await manageProjectFoldersDialog.locator('.create-project-folder-row').first().getByRole('button').count(), 0, 'the primary project folder cannot be removed');
   await page.keyboard.press('Escape');
@@ -942,13 +974,109 @@ try {
   const firstNavBox = await page.getByTestId('sidebar-worktable').boundingBox();
   assert.ok(newConversationBox && firstNavBox && firstNavBox.y >= newConversationBox.y + newConversationBox.height, 'the original navigation actions are positioned below New conversation');
   assert.ok(newConversationBox && firstNavBox && firstNavBox.y - (newConversationBox.y + newConversationBox.height) <= 2, 'New conversation and Worktable use a compact vertical gap');
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByTestId('sidebar-worktable').click();
   await page.getByTestId('worktable-shell').waitFor();
-  assert.equal((await page.getByTestId('worktable-shell').innerText()).trim(), '', 'the reserved Worktable entry exposes no unfinished content');
-  assert.equal(await page.locator('.worktable-stage, .worktable-drawer, .worktable-welcome').count(), 0, 'the previous Worktable implementation is removed from the product surface');
-  const reservedWorktableGeometry = await page.getByTestId('worktable-shell').evaluate((surface) => ({ width: surface.getBoundingClientRect().width, height: surface.getBoundingClientRect().height }));
-  assert.ok(reservedWorktableGeometry.width > 600 && reservedWorktableGeometry.height > 400, 'the reserved Worktable entry keeps a stable empty surface');
-  await page.screenshot({ path: join(artifactRoot, packaged ? 'worktable-reserved-packaged.png' : 'worktable-reserved.png') });
+  assert.equal(await page.locator('.worktable-drawer').count(), 1, 'Workbench v1 exposes the project/instance drawer');
+  assert.equal(await page.locator('.worktable-stage').count(), 1, 'Workbench v1 exposes a dockable canvas');
+  assert.equal(await page.locator('.worktable-chat-dock').count(), 1, 'Workbench v1 exposes the bound primary Agent conversation');
+  await page.getByTestId('worktable-welcome-create').click();
+  await page.getByTestId('worktable-create-dialog').waitFor();
+  await page.getByTestId('worktable-template-sci.core:research').click();
+  await page.getByTestId('worktable-create-title-input').fill('E2E 科研控制台');
+  await page.getByTestId('worktable-create-confirm').click();
+  await page.getByTestId('worktable-title').filter({ hasText: 'E2E 科研控制台' }).waitFor();
+  await page.getByTestId('workbench-studio').waitFor();
+  assert.match(await page.getByTestId('workbench-studio').innerText(), /提示词生成应用[\s\S]*外部工具链代理[\s\S]*策展插件目录/u, 'the control room exposes generated apps, toolchains, and the curated catalog without a model call');
+  const studio = page.getByTestId('workbench-studio');
+  const layoutSummary = studio.locator('summary').filter({ hasText: '布局提案' });
+  await layoutSummary.click();
+  await page.getByTestId('workbench-layout-editor').waitFor();
+  const layoutBefore = (await snapshot(page)).workbenchInstances.find((candidate) => candidate.title === 'E2E 科研控制台');
+  assert.ok(layoutBefore, 'the shared Workbench v1 instance is missing');
+  await page.getByTestId('workbench-layout-split-right').click();
+  const rejectedLayout = await waitFor(async () => {
+    const state = await snapshot(page);
+    return state.layoutProposals.find((candidate) => candidate.instanceId === layoutBefore.id && candidate.status === 'pending');
+  });
+  assert.equal((await snapshot(page)).workbenchInstances.find((candidate) => candidate.id === layoutBefore.id)?.panes.length, layoutBefore.panes.length, 'previewing a layout must not mutate shared panes');
+  await studio.getByRole('button', { name: '拒绝', exact: true }).click();
+  await page.getByTestId('app-dialog-confirm').click();
+  await waitFor(async () => (await snapshot(page)).layoutProposals.find((candidate) => candidate.id === rejectedLayout.id)?.status === 'rejected' ? true : undefined);
+  assert.equal((await snapshot(page)).workbenchInstances.find((candidate) => candidate.id === layoutBefore.id)?.panes.length, layoutBefore.panes.length, 'rejecting a layout must preserve the current topology');
+
+  await page.getByTestId('workbench-layout-split-right').click();
+  const acceptedLayout = await waitFor(async () => {
+    const state = await snapshot(page);
+    return state.layoutProposals.find((candidate) => candidate.instanceId === layoutBefore.id && candidate.status === 'pending');
+  });
+  await studio.getByRole('button', { name: '确认布局', exact: true }).click();
+  await page.getByTestId('app-dialog-confirm').click();
+  await waitFor(async () => (await snapshot(page)).layoutProposals.find((candidate) => candidate.id === acceptedLayout.id)?.status === 'accepted' ? true : undefined);
+  assert.equal((await snapshot(page)).workbenchInstances.find((candidate) => candidate.id === layoutBefore.id)?.panes.length, layoutBefore.panes.length + 1, 'accepted layout proposal must update the shared topology');
+
+  const workbenchSessionId = (await snapshot(page)).activeSessionId;
+  const paperConsoleErrorStart = rendererConsoleErrors.length;
+  const paperSha256 = createHash('sha256').update(pdfFixture).digest('hex');
+  const paperCreated = await runtimeJson(page, '/api/worktable/instances', {
+    templateId: 'sci.paper-reader:deep-read',
+    title: 'E2E 论文精读',
+    boundSessionId: workbenchSessionId,
+    inputs: {
+      mainPdf: { rootId: 'project', path: 'e2e-paper.pdf', name: 'e2e-paper.pdf', sha256: paperSha256, size: pdfFixture.length, mediaType: 'application/pdf' },
+      supplements: [{ rootId: 'project', path: 'e2e-si.pdf', name: 'e2e-si.pdf', sha256: paperSha256, size: pdfFixture.length, mediaType: 'application/pdf' }],
+      language: 'zh-CN',
+    },
+  });
+  assert.equal(paperCreated.instance.templateId, 'sci.paper-reader:deep-read');
+  await runtimeJson(page, `/api/worktable/instances/${encodeURIComponent(paperCreated.instance.id)}/activate`, {});
+  await page.getByTestId('worktable-title').filter({ hasText: 'E2E 论文精读' }).waitFor();
+  await page.getByTestId('worktable-pdf-viewer').waitFor();
+  const mountedPdfTabs = await page.locator('.worktable-pane-tabs button').allTextContents();
+  assert.deepEqual(mountedPdfTabs.filter((title) => ['主文 PDF', 'SI PDF'].includes(title)), ['主文 PDF', 'SI PDF'], 'paper Workbench mounts immutable main and SI revisions as native PDF tabs');
+  const paperAnalysisPane = paperCreated.instance.panes.find((candidate) => candidate.tabs.some((candidateTab) => candidateTab.title === '章节、图表、复现与全局报告'));
+  const paperAnalysisTab = paperAnalysisPane?.tabs.find((candidate) => candidate.title === '章节、图表、复现与全局报告');
+  assert.ok(paperAnalysisPane && paperAnalysisTab, 'paper analysis slot is missing');
+  await runtimeJson(page, `/api/worktable/instances/${encodeURIComponent(paperCreated.instance.id)}/panes/${encodeURIComponent(paperAnalysisPane.id)}/tabs`, {
+    title: 'E2E 后台任务',
+    content: { kind: 'builtin', type: 'tasks' },
+  });
+  await page.locator('.worktable-pane-tabs button.is-active').filter({ hasText: 'E2E 后台任务' }).waitFor();
+  await page.locator('.worktable-pane-tabs button').filter({ hasText: '章节、图表、复现与全局报告' }).click();
+  const paperAnalysisFrame = page.frameLocator('iframe[title="章节、图表、复现与全局报告"]');
+  await paperAnalysisFrame.locator('body[data-panel="analysis"]').waitFor();
+  await paperAnalysisFrame.locator('body').evaluate(() => { globalThis.__paperPanelLifecycleMarker = 'stable-panel'; });
+  await runtimeJson(page, `/api/worktable/instances/${encodeURIComponent(paperCreated.instance.id)}/activate`, {});
+  await pause(500);
+  assert.equal(await paperAnalysisFrame.locator('body').evaluate(() => globalThis.__paperPanelLifecycleMarker), 'stable-panel', 'runtime snapshots must not reload a mounted plugin sandbox');
+  assert.equal(await page.locator('.worktable-pane-tabs button.is-active').filter({ hasText: '章节、图表、复现与全局报告' }).count(), 1, 'runtime snapshots must not reset the device-local tab to the shared mounted tab');
+  await waitFor(async () => await page.getByTestId('worktable-pdf-canvas').evaluate((canvas) => canvas instanceof HTMLCanvasElement && canvas.width > 0 && canvas.height > 0));
+  assert.equal(rendererConsoleErrors.slice(paperConsoleErrorStart).some((message) => message.includes('PDF') || message.includes('Content Security Policy') || message.includes('violates the following')), false, 'paper PDF is rendered by the authenticated host viewer without sandbox or CSP failures');
+  const workbenchState = await snapshot(page);
+  assert.equal(workbenchState.workbenchInstances.length, 2, 'one project can own multiple Workbench v1 instances');
+  assert.equal(workbenchState.workbenchInstances.every((instance) => instance.primaryConversationId === workbenchSessionId), true, 'each instance binds the primary conversation explicitly');
+  const paperInstance = workbenchState.workbenchInstances.find((instance) => instance.id === paperCreated.instance.id);
+  assert.equal(paperInstance?.layout.kind, 'split');
+  assert.equal(paperInstance?.layout.ratio, 0.58, 'paper reader starts with the declared 58/42 source-analysis split');
+
+  await page.getByTestId('worktable-chat-expand').waitFor();
+  const expandGeometry = await page.getByTestId('worktable-chat-expand').evaluate((button) => ({ width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height }));
+  assert.ok(Math.abs(expandGeometry.width - expandGeometry.height) <= 1 && expandGeometry.width >= 30, 'the collapsed Agent dock leaves only the requested square expand arrow');
+  const stageWidthCollapsed = (await page.locator('.worktable-stage').boundingBox())?.width ?? 0;
+  await page.getByTestId('worktable-chat-expand').click();
+  await page.getByTestId('worktable-chat-collapse').waitFor();
+  const stageWidthWithChat = await waitFor(async () => {
+    const width = (await page.locator('.worktable-stage').boundingBox())?.width ?? 0;
+    return stageWidthCollapsed > width + 200 ? width : undefined;
+  });
+  assert.ok(stageWidthCollapsed > stageWidthWithChat + 200, 'on wide screens the open Agent dock squeezes the canvas');
+
+  await page.setViewportSize({ width: 1100, height: 800 });
+  const narrowChat = await page.locator('.worktable-chat-dock').evaluate((element) => ({ position: getComputedStyle(element).position, right: getComputedStyle(element).right }));
+  assert.equal(narrowChat.position, 'absolute', 'on narrow screens the Agent conversation becomes a canvas overlay');
+  assert.equal(narrowChat.right, '0px');
+  await page.screenshot({ path: join(artifactRoot, packaged ? 'workbench-v1-packaged.png' : 'workbench-v1.png') });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByTestId('worktable-return-chat').waitFor();
   await page.getByTestId('worktable-return-chat').click();
   await page.locator('.conversation-pane').waitFor();
@@ -2071,6 +2199,7 @@ try {
   await approveNext(page);
   await page.getByText('E2E_MULTI_DONE', { exact: true }).waitFor({ timeout: 60_000 });
   await waitTurnIdle(page);
+  const multiSessionId = (await snapshot(page)).activeSessionId;
   await waitFor(async () => {
     const state = await snapshot(page);
     return state.tasks.length === 3 && state.tasks.every((task) => task.status === 'completed') && state.channels.filter((channel) => channel.kind === 'private').length >= 3;
@@ -2152,6 +2281,14 @@ try {
 
   const second = await launch();
   secondApplication = second.application;
+  await second.page.getByTestId('worktable-shell').waitFor();
+  assert.equal(await second.page.getByTestId('worktable-return-chat').isVisible(), true, 'configured users restart into the Workbench v1 default entry');
+  await second.page.getByTestId(`worktable-instance-${paperCreated.instance.id}`).locator('> button').click();
+  await second.page.getByTestId('worktable-title').filter({ hasText: 'E2E 论文精读' }).waitFor();
+  await second.page.locator('.worktable-pane-tabs button.is-active').filter({ hasText: '章节、图表、复现与全局报告' }).waitFor();
+  await second.page.frameLocator('iframe[title="章节、图表、复现与全局报告"]').locator('body[data-panel="analysis"]').waitFor();
+  await second.page.getByTestId('worktable-return-chat').click();
+  await second.page.locator('.app-mode-chat [data-testid="composer-input"]').waitFor();
   assert.equal(await secondApplication.evaluate(({ app }) => app.isHardwareAccelerationEnabled()), false, 'saved hardware acceleration setting must apply before Electron is ready');
   const restoredInterfacePreferences = await second.page.evaluate(async () => await window.openlab.getInterfacePreferences());
   assert.equal(restoredInterfacePreferences.theme, 'coral-paper');
@@ -2164,6 +2301,9 @@ try {
   assert.equal(await second.page.evaluate(() => document.documentElement.dataset.sessionDensity), 'single');
   assert.equal(await second.page.getByTestId('primary-agent-onboarding').count(), 0, 'onboarding must not reappear after restart');
   await waitFor(async () => (await snapshot(second.page)).mode === 'connected' ? true : undefined);
+  const restoredMultiSession = second.page.locator(`.session-item[data-session-id="${multiSessionId}"]`);
+  await restoredMultiSession.waitFor();
+  await restoredMultiSession.click();
   await second.page.getByText('E2E_MULTI_DONE', { exact: true }).waitFor();
   const restored = await snapshot(second.page);
   const restoredLayout = await second.page.evaluate((projectId) => JSON.parse(localStorage.getItem(`openlab.chat-layout.v1:${encodeURIComponent(projectId)}`)), restored.project.id);
@@ -2193,6 +2333,11 @@ try {
   assert.equal(restored.workspace.roots.some((root) => root.kind === 'project' && root.displayPath.toLocaleLowerCase() === additionalProjectRoot.toLocaleLowerCase()), true, 'project folder bindings survive an application restart');
   assert.equal(restored.workspace.roots.some((root) => root.id === authorizedRoot.id && root.status === 'online'), true, 'the original session authorization must survive restart');
   assert.equal(restored.conversationFiles.some((item) => item.ref.rootId === authorizedRoot.id && item.ref.path === 'workspace-e2e.md'), false, 'removed conversation-file references stay removed after restart');
+  assert.deepEqual(readFileSync(join(projectRoot, 'e2e-paper.pdf')), pdfFixture, 'paper reading keeps the original project PDF byte-for-byte unchanged');
+  assert.deepEqual(readFileSync(join(projectRoot, 'e2e-si.pdf')), pdfFixture, 'paper reading keeps the original SI PDF byte-for-byte unchanged');
+  assert.deepEqual(readFileSync(join(externalRoot, 'preview.pdf')), pdfFixture, 'workspace preview keeps external PDFs byte-for-byte unchanged');
+  assert.equal(readFileSync(join(externalRoot, 'external-evidence.md'), 'utf8'), '# External evidence\ntraceable', 'external evidence files remain unchanged');
+  assert.equal(readFileSync(join(additionalProjectRoot, 'dataset-notes.md'), 'utf8'), '# Bound dataset folder\nproject-wide', 'additional project roots remain unchanged');
   await secondApplication.close();
   secondApplication = undefined;
   process.stdout.write(`Electron E2E passed. Screenshot: ${screenshotPath}\n`);

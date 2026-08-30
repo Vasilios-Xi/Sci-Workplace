@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 4,
+  "apiVersion": 4,
+  "id": "lab.example",
+  "name": "Example Evidence Plugin",
+  "version": "0.1.0",
+  "engine": "^0.1.0",
+  "entry": "src/index.ts",
+  "permissions": ["evidence:read"],
+  "contributes": {
+    "tools": ["inspect_evidence"]
+  }
+}

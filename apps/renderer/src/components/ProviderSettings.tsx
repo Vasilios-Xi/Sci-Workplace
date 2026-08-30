@@ -113,6 +113,7 @@ export function ProviderSettings(props: ProviderSettingsProps) {
   }, [props.providers, selectedId]);
   const selected = props.providers.find((item) => item.definition.id === selectedId);
   const models = props.models;
+  const visionModels = models.filter((model) => model.supportsVision);
 
   return <div className="provider-settings">
     <div className="settings-heading provider-heading"><span className="settings-heading__icon cyan"><Server size={20}/></span><div><h2>{copy.providers.title}</h2><p>{copy.providers.subtitle}</p></div></div>
@@ -130,6 +131,8 @@ export function ProviderSettings(props: ProviderSettingsProps) {
       <div>
         <div className="provider-routing-field"><span><strong>{v3Copy.providerRouting.agentModel}</strong><small>{v3Copy.providerRouting.agentModelHint}</small></span><ModelPicker models={models} value={props.settings.defaultAgentModel} label={v3Copy.providerRouting.agentModel} variant="field" testId="provider-agent-model-picker" menuTestId="provider-agent-model-picker-menu" onChange={(defaultAgentModel) => void props.onUpdateSettings({ defaultAgentModel })}/></div>
         <div className="provider-routing-field"><span><strong>{v3Copy.providerRouting.utilityModel}</strong><small>{v3Copy.providerRouting.utilityModelHint}</small></span><ModelPicker models={models} value={props.settings.utilityModel} label={v3Copy.providerRouting.utilityModel} variant="field" testId="provider-utility-model-picker" menuTestId="provider-utility-model-picker-menu" onChange={(utilityModel) => void props.onUpdateSettings({ utilityModel })}/></div>
+        <div className="provider-routing-field"><span><strong>{v3Copy.providerRouting.paperReaderTextModel}</strong><small>{v3Copy.providerRouting.paperReaderTextModelHint}</small></span><ModelPicker models={models} value={props.settings.paperReaderTextModel} label={v3Copy.providerRouting.paperReaderTextModel} variant="field" testId="provider-paper-reader-text-model-picker" menuTestId="provider-paper-reader-text-model-picker-menu" onChange={(paperReaderTextModel) => void props.onUpdateSettings({ paperReaderTextModel })}/></div>
+        <div className="provider-routing-field"><span><strong>{v3Copy.providerRouting.paperReaderVisionModel}</strong><small>{v3Copy.providerRouting.paperReaderVisionModelHint}</small></span><ModelPicker models={visionModels} value={props.settings.paperReaderVisionModel} label={v3Copy.providerRouting.paperReaderVisionModel} variant="field" testId="provider-paper-reader-vision-model-picker" menuTestId="provider-paper-reader-vision-model-picker-menu" onChange={(paperReaderVisionModel) => void props.onUpdateSettings({ paperReaderVisionModel })}/></div>
       </div>
       {models.length === 0 && <p>{copy.providers.noConnectedModels}</p>}
     </section>

@@ -1,4 +1,4 @@
-import type { ConversationProjectTarget, SessionAgentBinding } from '@openlab/protocol';
+import type { ConversationProjectTarget, SessionAgentBinding, SessionSummary } from '@openlab/protocol';
 
 export type ConversationDraftPhase = 'editing' | 'submitting' | 'committing';
 
@@ -22,6 +22,20 @@ export type ConversationDraftAction =
   | { type: 'submit-failed'; draftId: string; attemptId: string }
   | { type: 'complete'; draftId: string; attemptId: string; sessionId: string }
   | { type: 'cancel'; draftId?: string };
+
+export function shouldStartInitialConversationDraft(input: {
+  connected: boolean;
+  preview: boolean;
+  primaryAgentConfigured: boolean;
+  hasDraft: boolean;
+  projectId: string;
+  sessions: Array<Pick<SessionSummary, 'projectId' | 'status' | 'temporary'>>;
+}): boolean {
+  if (!input.connected || input.preview || !input.primaryAgentConfigured || input.hasDraft) return false;
+  return !input.sessions.some((session) => session.projectId === input.projectId
+    && !session.temporary
+    && session.status !== 'archived');
+}
 
 export function conversationDraftReducer(
   state: ConversationDraft | null,

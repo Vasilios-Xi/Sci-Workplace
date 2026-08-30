@@ -540,10 +540,11 @@ export function registerCoreTools(deps: CoreToolDependencies): () => void {
 
   if (deps.updateSettings) disposers.push(deps.registry.register({
     definition: {
-      name: 'propose_harness_settings', title: '提议修改 Harness 设置', description: '提议修改默认 Agent 模型、小工具模型、并发运行数或上下文预算；必须经用户审批后才保存。',
+      name: 'propose_harness_settings', title: '提议修改 Harness 设置', description: '提议修改默认 Agent、小工具、论文精读文本/视觉模型、并发运行数或上下文预算；必须经用户审批后才保存。',
       inputSchema: {
         type: 'object', properties: {
-          defaultAgentModel: { type: 'string' }, utilityModel: { type: 'string' }, maxConcurrentAgentRuns: { type: 'number' },
+          defaultAgentModel: { type: 'string' }, utilityModel: { type: 'string' },
+          paperReaderTextModel: { type: 'string' }, paperReaderVisionModel: { type: 'string' }, maxConcurrentAgentRuns: { type: 'number' },
           defaultAgentContextBudget: { type: 'number' }, delegatedAgentContextBudget: { type: 'number' },
         }, additionalProperties: false,
       },
@@ -553,6 +554,8 @@ export function registerCoreTools(deps: CoreToolDependencies): () => void {
       const patch: Partial<HarnessSettings> = {};
       if (typeof input.defaultAgentModel === 'string') patch.defaultAgentModel = input.defaultAgentModel;
       if (typeof input.utilityModel === 'string') patch.utilityModel = input.utilityModel;
+      if (typeof input.paperReaderTextModel === 'string') patch.paperReaderTextModel = input.paperReaderTextModel;
+      if (typeof input.paperReaderVisionModel === 'string') patch.paperReaderVisionModel = input.paperReaderVisionModel;
       if (typeof input.maxConcurrentAgentRuns === 'number') patch.maxConcurrentAgentRuns = input.maxConcurrentAgentRuns;
       if (typeof input.defaultAgentContextBudget === 'number') patch.defaultAgentContextBudget = input.defaultAgentContextBudget;
       if (typeof input.delegatedAgentContextBudget === 'number') patch.delegatedAgentContextBudget = input.delegatedAgentContextBudget;

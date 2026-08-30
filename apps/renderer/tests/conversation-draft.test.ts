@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionAgentBinding } from '@openlab/protocol';
-import { conversationDraftReducer } from '../src/lib/conversation-draft.js';
+import { conversationDraftReducer, shouldStartInitialConversationDraft } from '../src/lib/conversation-draft.js';
 
 const binding: SessionAgentBinding = {
   sessionId: 'draft:one',
@@ -11,6 +11,28 @@ const binding: SessionAgentBinding = {
 };
 
 describe('new conversation state machine', () => {
+  it('opens a renderer-only draft after first Agent setup without creating a persisted conversation', () => {
+    const base = {
+      connected: true,
+      preview: false,
+      primaryAgentConfigured: true,
+      hasDraft: false,
+      projectId: 'project-one',
+      sessions: [],
+    };
+    expect(shouldStartInitialConversationDraft(base)).toBe(true);
+    expect(shouldStartInitialConversationDraft({ ...base, primaryAgentConfigured: false })).toBe(false);
+    expect(shouldStartInitialConversationDraft({ ...base, hasDraft: true })).toBe(false);
+    expect(shouldStartInitialConversationDraft({
+      ...base,
+      sessions: [{ projectId: 'project-one', status: 'idle', temporary: false }],
+    })).toBe(false);
+    expect(shouldStartInitialConversationDraft({
+      ...base,
+      sessions: [{ projectId: 'another-project', status: 'idle', temporary: false }],
+    })).toBe(true);
+  });
+
   it('always starts detached and keeps project selection renderer-local', () => {
     const started = conversationDraftReducer(null, { type: 'start', id: 'one', temporary: false, binding });
     expect(started?.target).toEqual({ kind: 'detached' });

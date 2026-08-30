@@ -65,11 +65,12 @@ interface RuntimeErrorMessage {
 
 const require = createRequire(import.meta.url);
 app.setName('Sci Workplace');
-// Keep the legacy data directory so the product rename does not strand existing
-// conversations, credentials, preferences, or project bindings.
+// Harness v1 intentionally starts from a new application-managed state root.
+// scripts/reset-app-state.ps1 backs up this managed root before an explicit
+// reset; user project directories are never part of this path.
 const appDataRoot = process.env.OPENLAB_TEST_USER_DATA_ROOT
   ? resolve(process.env.OPENLAB_TEST_USER_DATA_ROOT)
-  : join(app.getPath('appData'), 'OpenLab');
+  : join(app.getPath('appData'), 'SciWorkplace');
 app.setPath('userData', appDataRoot);
 
 let mainWindow: BrowserWindow | undefined;
@@ -292,11 +293,38 @@ async function runtimeRequestAll(path: string, init?: RequestInit): Promise<void
 
 async function stopRuntimeChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  try { child.send?.({ type: 'shutdown' }); }
-  catch { child.kill(); }
   await new Promise<void>((resolvePromise) => {
-    const timer = setTimeout(() => { child.kill(); resolvePromise(); }, 10_000);
-    child.once('exit', () => { clearTimeout(timer); resolvePromise(); });
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    const complete = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', complete);
+      resolvePromise();
+    };
+    const kill = () => {
+      try {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      } catch { /* The process may have exited between the liveness check and kill. */ }
+    };
+    timer = setTimeout(() => { kill(); complete(); }, 10_000);
+    child.once('exit', complete);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      complete();
+      return;
+    }
+    if (!child.connected || !child.send) {
+      kill();
+      return;
+    }
+    try {
+      child.send({ type: 'shutdown' }, (error) => {
+        if (error) kill();
+      });
+    } catch {
+      kill();
+    }
   });
 }
 
@@ -337,29 +365,29 @@ function spawnRuntime(projectRoot: string, projectFolderSelectedOverride?: boole
     child.stderr?.on('data', (chunk: Buffer) => {
       if (!app.isPackaged) process.stderr.write(chunk);
     });
-    const timer = setTimeout(() => {
+    let timer: NodeJS.Timeout | undefined;
+    const failStartup = (error: Error) => {
       if (startupSettled) return;
       startupSettled = true;
-      child.kill();
-      reject(new Error(copy.runtimeStartTimeout));
-    }, 90_000);
+      if (timer) clearTimeout(timer);
+      try { child.kill(); } catch { /* The child may already have exited. */ }
+      reject(error);
+    };
+    timer = setTimeout(() => failStartup(new Error(copy.runtimeStartTimeout)), 90_000);
+    child.once('error', (error) => failStartup(error));
     child.on('message', (message: RuntimeReadyMessage | RuntimeErrorMessage) => {
       if (message.type === 'error') {
-        if (startupSettled) return;
-        startupSettled = true;
-        clearTimeout(timer);
-        child.kill();
-        reject(new Error(message.message));
+        failStartup(new Error(message.message));
         return;
       }
       if (message.type === 'ready' && !startupSettled) {
         startupSettled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         resolvePromise({ baseUrl: message.url, token: message.authToken, projectRoot, projectFolderSelected: projectFolderSelectedOverride ?? selectedProjectRoot() === resolve(projectRoot) });
       }
     });
     child.once('exit', (code) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       runtimeChildren.delete(child);
       removeRuntimeSlot(child);
       if (!startupSettled) {
@@ -373,23 +401,40 @@ function spawnRuntime(projectRoot: string, projectFolderSelectedOverride?: boole
         if (code && !mainWindow?.isDestroyed()) void dialog.showMessageBox({ type: 'error', title: copy.runtimeStoppedTitle, message: copy.runtimeStoppedMessage, detail: copy.exitCode(code) });
       }
     });
-    child.send({
+    const startMessage = {
       type: 'start',
       config: {
         host: '127.0.0.1', port: 0, authToken, projectRoot,
         ...(additionalProjectRoots.length ? { projectRoots: additionalProjectRoots } : {}),
-        home: app.getPath('userData'), demo: false,
+        home: app.getPath('userData'), demo: false, deferInitialSession: true,
         credentials: readMcpCredentials(),
         ...(browserBrokerConnection ? { browserBroker: browserBrokerConnection } : {}),
         ...(readDeepSeekKey() ? { deepSeekApiKey: readDeepSeekKey() } : {}),
       },
-    });
+    };
+    try {
+      child.send(startMessage, (error) => {
+        if (error) failStartup(error);
+      });
+    } catch (error) {
+      failStartup(error instanceof Error ? error : new Error(String(error)));
+    }
   });
   return { child, ready };
 }
 
 function runtimeTargetKey(projectRoot: string, projectFolderSelected: boolean): string {
-  return `${resolve(projectRoot).toLocaleLowerCase()}\u0000${projectFolderSelected ? 'project' : 'detached'}`;
+  // A runtime owns the database below one absolute project root. Whether that
+  // root is currently presented as a saved project or a detached conversation
+  // is UI/session state and must never create a second writer for the same DB.
+  void projectFolderSelected;
+  return resolve(projectRoot).toLocaleLowerCase();
+}
+
+function runtimeConnectionView(target: RuntimeConnection, projectFolderSelected: boolean): RuntimeConnection {
+  return target.projectFolderSelected === projectFolderSelected
+    ? target
+    : { ...target, projectFolderSelected };
 }
 
 function runtimeSlotForChild(child: ChildProcess): RuntimeSlot | undefined {
@@ -448,11 +493,38 @@ function trimRuntimeSlots(): void {
   }
 }
 
-function invalidateInactiveRuntimes(): void {
+function snapshotHasActiveWork(snapshot: BootstrapSnapshot): boolean {
+  const activeStatuses = new Set(['queued', 'running', 'paused', 'waiting_approval', 'inspecting', 'parsing', 'analyzing']);
+  return snapshot.jobs.some((job) => activeStatuses.has(job.status))
+    || snapshot.runRecords.some((run) => activeStatuses.has(run.status))
+    || snapshot.agentRuns.some((run) => activeStatuses.has(run.status))
+    || snapshot.toolRuns.some((run) => activeStatuses.has(run.status))
+    || snapshot.paperReaders.some((reader) => activeStatuses.has(reader.status))
+    || snapshot.sessions.some((item) => item.status === 'running');
+}
+
+async function runtimeSlotHasActiveWork(slot: RuntimeSlot): Promise<boolean> {
+  try {
+    return snapshotHasActiveWork(await runtimeSnapshotAt(await slot.ready));
+  } catch {
+    // Losing a background Runtime is worse than retaining an uncertain slot.
+    // A later explicit shutdown/project removal still has authority to stop it.
+    return true;
+  }
+}
+
+async function invalidateInactiveRuntimes(): Promise<void> {
   for (const slot of [...runtimeSlots.values()]) {
     if (slot.child === runtimeChild) continue;
-    if (runtimeSlots.get(slot.key) === slot) runtimeSlots.delete(slot.key);
-    void stopRuntimeChild(slot.child).catch(() => undefined);
+    slot.leases++;
+    try {
+      if (await runtimeSlotHasActiveWork(slot)) continue;
+      if (slot.child === runtimeChild || runtimeSlots.get(slot.key) !== slot) continue;
+      runtimeSlots.delete(slot.key);
+      await stopRuntimeChild(slot.child).catch(() => undefined);
+    } finally {
+      slot.leases--;
+    }
   }
 }
 
@@ -506,7 +578,8 @@ function startRuntime(projectRoot = defaultProjectRoot(), projectFolderSelectedO
   const selected = projectFolderSelectedOverride ?? selectedProjectRoot() === targetRoot;
   const slot = acquireRuntime(targetRoot, selected);
   runtimeChild = slot.child;
-  runtimeReady = slot.ready.then((next) => {
+  runtimeReady = slot.ready.then((value) => {
+    const next = runtimeConnectionView(value, selected);
     if (runtimeChild === slot.child) {
       connection = next;
       touchRuntimeSlot(slot);
@@ -525,15 +598,19 @@ function runRuntimeTransition<T>(operation: () => Promise<T>): Promise<T> {
 async function switchRuntimeUnlocked(projectRoot: string, projectFolderSelected: boolean): Promise<RuntimeConnection> {
   const targetRoot = resolve(projectRoot);
   const key = runtimeTargetKey(targetRoot, projectFolderSelected);
-  if (connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === key) return connection;
+  if (connection && runtimeTargetKey(connection.projectRoot, connection.projectFolderSelected) === key) {
+    connection = runtimeConnectionView(connection, projectFolderSelected);
+    runtimeReady = Promise.resolve(connection);
+    return connection;
+  }
 
   const slot = acquireRuntime(targetRoot, projectFolderSelected);
   slot.leases++;
   try {
-    const next = await slot.ready;
+    const next = runtimeConnectionView(await slot.ready, projectFolderSelected);
     runtimeChild = slot.child;
     connection = next;
-    runtimeReady = slot.ready;
+    runtimeReady = Promise.resolve(next);
     touchRuntimeSlot(slot);
     return next;
   } finally {
@@ -611,13 +688,12 @@ async function startConversationTransaction(rawInput: unknown): Promise<DesktopC
 
   return await runRuntimeTransition(async () => {
     const previousConnection = connection ?? await startRuntime();
-    const sameRuntime = resolve(previousConnection.projectRoot) === resolve(target.rootPath)
-      && previousConnection.projectFolderSelected === target.selected;
+    const sameRuntime = resolve(previousConnection.projectRoot) === resolve(target.rootPath);
     const staged = sameRuntime ? undefined : acquireRuntime(target.rootPath, target.selected);
     if (staged) staged.leases++;
-    let targetConnection = previousConnection;
+    let targetConnection = runtimeConnectionView(previousConnection, target.selected);
     try {
-      if (staged) targetConnection = await staged.ready;
+      if (staged) targetConnection = runtimeConnectionView(await staged.ready, target.selected);
       const migratedAttachments = migrateConversationAttachments(message.attachments, previousConnection.projectRoot, target.rootPath);
       const conversationInput: ConversationStartInput = {
         ...(typeof value.title === 'string' ? { title: value.title } : {}),
@@ -641,8 +717,11 @@ async function startConversationTransaction(rawInput: unknown): Promise<DesktopC
       if (staged) {
         runtimeChild = staged.child;
         connection = targetConnection;
-        runtimeReady = staged.ready;
+        runtimeReady = Promise.resolve(targetConnection);
         touchRuntimeSlot(staged);
+      } else if (connection === previousConnection) {
+        connection = targetConnection;
+        runtimeReady = Promise.resolve(targetConnection);
       }
       return { ...started, connection: targetConnection, snapshot };
     } finally {
@@ -761,8 +840,8 @@ async function createWindow(): Promise<void> {
 
 function registerIpc(): void {
   ipcMain.handle('runtime:get-connection', async () => connection ?? await startRuntime());
-  ipcMain.handle('runtime:invalidate-inactive', () => {
-    invalidateInactiveRuntimes();
+  ipcMain.handle('runtime:invalidate-inactive', async () => {
+    await invalidateInactiveRuntimes();
     return true;
   });
   ipcMain.handle('interface:get-preferences', () => currentInterfacePreferences());
@@ -805,14 +884,14 @@ function registerIpc(): void {
     const value = raw.trim();
     saveDeepSeekKey(value);
     runtimeChild?.send?.({ type: 'provider-key', apiKey: value });
-    invalidateInactiveRuntimes();
+    await invalidateInactiveRuntimes();
     return { configured: true, protected: true };
   });
   ipcMain.handle('credential:save', async (_event, raw: unknown) => {
     if (typeof raw !== 'string' || !raw) throw new Error(copy.credentialEmpty);
     const id = saveMcpCredential(raw);
     await runtimeRequest('/api/credentials', { method: 'POST', body: JSON.stringify({ id, value: raw }) });
-    invalidateInactiveRuntimes();
+    await invalidateInactiveRuntimes();
     return id;
   });
   ipcMain.handle('project:choose', async () => {
@@ -969,6 +1048,22 @@ function registerIpc(): void {
       title: kind === 'skill' ? copy.chooseSkillSource : copy.choosePluginSource,
       properties: choice.response === 0 ? ['openDirectory'] : ['openFile'],
       ...(choice.response === 1 ? { filters: [{ name: copy.archive, extensions: ['zip'] }] } : {}),
+    });
+    return result.canceled ? undefined : result.filePaths[0];
+  });
+  ipcMain.handle('plugin-catalog:choose-index', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: copy.choosePluginCatalogIndex,
+      properties: ['openFile'],
+      filters: [{ name: copy.signedCatalog, extensions: ['json'] }],
+    });
+    return result.canceled ? undefined : result.filePaths[0];
+  });
+  ipcMain.handle('plugin-catalog:choose-package', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: copy.chooseCuratedPluginPackage,
+      properties: ['openFile'],
+      filters: [{ name: copy.zipArchive, extensions: ['zip'] }],
     });
     return result.canceled ? undefined : result.filePaths[0];
   });
@@ -1324,7 +1419,7 @@ app.whenReady().then(async () => {
     }
     const pluginPanel = details.resourceType === 'subFrame' && /^http:\/\/127\.0\.0\.1:\d+\/plugin-panels\//u.test(details.url);
     headers['Content-Security-Policy'] = [pluginPanel
-      ? "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*"
+      ? "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data:; frame-src http://127.0.0.1:*; object-src http://127.0.0.1:*; form-action 'none'; base-uri 'none'; frame-ancestors file: http://127.0.0.1:*"
       : [
         "default-src 'self'",
         "script-src 'self'",

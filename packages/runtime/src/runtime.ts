@@ -38,9 +38,11 @@ import type {
   GeneratedWorktableApp,
   HarnessSettings,
   JsonValue,
+  JsonSchema,
   JobRecord,
   JobSpec,
   MailboxMessage,
+  MountIntentV1,
   McpServerConfig,
   McpServerState,
   ModelEvent,
@@ -52,8 +54,8 @@ import type {
   ModelProviderId,
   ModelUsage,
   PermissionMode,
+  PaperReaderModuleV2,
   PluginManifest,
-  PluginPermission,
   PluginStorageEntry,
   PrimaryAgentProfile,
   PrimaryAgentProfileUpdate,
@@ -86,6 +88,7 @@ import type {
   WorkspaceAccessMode,
   WorkspaceSearchResult,
   WorkbenchContribution,
+  WorkbenchSlotV1,
   WorkbenchState,
   WorktableContent,
   WorktableContextSnapshot,
@@ -124,6 +127,7 @@ import {
 } from './security/approval-policy.js';
 import { SkillManager } from './extensions/skills.js';
 import { PluginManager } from './extensions/plugin-manager.js';
+import { CuratedPluginMarketplace } from './extensions/curated-plugin-marketplace.js';
 import type { PluginHostCall } from './extensions/plugin-process.js';
 import { McpManager } from './extensions/mcp-manager.js';
 import { inspectScaffoldedPlugin, scaffoldPlugin, testScaffoldedPlugin, type ScaffoldedPlugin } from './extensions/plugin-scaffolder.js';
@@ -152,7 +156,25 @@ import { JobService } from './workbench/job-service.js';
 import { PluginWorkflowService } from './workbench/plugin-workflow-service.js';
 import { CORE_WORKBENCHES, WorkbenchStore } from './workbench/workbench-store.js';
 import { GeneratedAppService } from './worktable/generated-app-service.js';
-import { CORE_WORKTABLE_TEMPLATES, WorktableStore, legacyWorkbenchTemplate, validateWorktableInputs } from './worktable/worktable-store.js';
+import { WorktableStore, validateWorktableInputs } from './worktable/worktable-store.js';
+import { CORE_WORKBENCH_BLUEPRINTS, WorkbenchService } from './workbench/workbench-service.js';
+import { ScientificKernelStore } from './workbench/scientific-kernel-store.js';
+import { ToolchainAdapterService } from './workbench/toolchain-adapter-service.js';
+import { GeneratedAppBlueprintService } from './workbench/generated-app-blueprint-service.js';
+import { PaperReaderService } from './workbench/paper-reader-service.js';
+import {
+  runPaperReaderClaimEvidence,
+  runPaperReaderDocumentProfile,
+  runPaperReaderFigureAnalysis,
+  runPaperReaderFormulaAnalysis,
+  runPaperReaderQuestion,
+  runPaperReaderReproduction,
+  runPaperReaderSectionDigest,
+  runPaperReaderSynthesis,
+  runPaperReaderTerminology,
+  runPaperReaderTranslation,
+} from './workbench/paper-reader-model-adapter.js';
+import { paperReaderPanelHtml } from './workbench/paper-reader-panel.js';
 import { TerminalService, type TerminalDriver, type TerminalSessionRecord } from './worktable/terminal-service.js';
 import { ScmService, type ScmCommandExecutor } from './worktable/scm-service.js';
 import type { WindowsJobAttachment, WindowsJobLimits } from './security/windows-job-host.js';
@@ -183,8 +205,11 @@ const DEFAULT_USER_PROFILE: UserProfile = { name: '用户', profile: '' };
 const PRIMARY_AGENT_ROLES = new Set<PrimaryAgentProfile['role']>(['research_partner', 'rigorous_scholar', 'creative_explorer', 'custom']);
 
 const DEFAULT_HARNESS_SETTINGS: HarnessSettings = {
-  defaultAgentModel: 'deepseek::deepseek-v4-pro', utilityModel: 'deepseek::deepseek-v4-flash', maxConcurrentAgentRuns: 3,
+  defaultAgentModel: 'deepseek::deepseek-v4-pro', utilityModel: 'deepseek::deepseek-v4-flash',
+  paperReaderTextModel: 'deepseek::deepseek-v4-pro', paperReaderVisionModel: 'deepseek::deepseek-v4-flash-vision-exp',
+  maxConcurrentAgentRuns: 3,
   defaultAgentContextBudget: 128_000, delegatedAgentContextBudget: 96_000,
+  developerMode: false,
   securityPolicy: DEFAULT_SECURITY_APPROVAL_POLICY,
 };
 
@@ -228,9 +253,14 @@ function normalizeHarnessSettings(value: unknown): HarnessSettings {
   return {
     defaultAgentModel: normalizeModel(source.defaultAgentModel ?? source.supervisorModel, DEFAULT_HARNESS_SETTINGS.defaultAgentModel),
     utilityModel: normalizeModel(source.utilityModel ?? source.workerModel, DEFAULT_HARNESS_SETTINGS.utilityModel),
+    paperReaderTextModel: normalizeModel(source.paperReaderTextModel ?? source.utilityModel ?? source.workerModel, DEFAULT_HARNESS_SETTINGS.paperReaderTextModel),
+    paperReaderVisionModel: typeof source.paperReaderVisionModel === 'string'
+      ? source.paperReaderVisionModel.trim().slice(0, 200)
+      : DEFAULT_HARNESS_SETTINGS.paperReaderVisionModel,
     maxConcurrentAgentRuns: Math.min(8, Math.max(1, Math.trunc(Number(source.maxConcurrentAgentRuns ?? source.maxConcurrentWorkers) || 3))),
     defaultAgentContextBudget: Math.min(1_000_000, Math.max(32_000, Math.trunc(Number(source.defaultAgentContextBudget ?? source.supervisorContextBudget) || 128_000))),
     delegatedAgentContextBudget: Math.min(1_000_000, Math.max(32_000, Math.trunc(Number(source.delegatedAgentContextBudget ?? source.workerContextBudget) || 96_000))),
+    developerMode: source.developerMode === true,
     securityPolicy: normalizeSecurityApprovalPolicy(source.securityPolicy),
   };
 }
@@ -865,6 +895,7 @@ export class OpenLabRuntime {
   readonly pins: ContextPins;
   readonly skills: SkillManager;
   readonly plugins: PluginManager;
+  readonly pluginMarketplace: CuratedPluginMarketplace;
   readonly mcp: McpManager;
   readonly agents: AgentStore;
   readonly memories: AgentMemoryStore;
@@ -882,6 +913,11 @@ export class OpenLabRuntime {
   readonly modelGenerations: ModelGenerationService;
   readonly workbenches: WorkbenchStore;
   readonly worktables: WorktableStore;
+  readonly harnessWorkbenches: WorkbenchService;
+  readonly scientificKernel: ScientificKernelStore;
+  readonly toolchainAdapters: ToolchainAdapterService;
+  readonly generatedAppBlueprints: GeneratedAppBlueprintService;
+  readonly paperReaders: PaperReaderService;
   readonly terminals: TerminalService;
   readonly scm: ScmService;
   readonly pricing: DeepSeekPricingTable;
@@ -1001,6 +1037,209 @@ export class OpenLabRuntime {
     this.pluginStorage = new PluginStorage({ projectId: manifest.id, events: this.events, activeSessionId: () => this.#activeSessionId });
     this.workbenches = new WorkbenchStore({ projectId: manifest.id, events: this.events });
     this.worktables = new WorktableStore({ projectId: manifest.id, events: this.events });
+    this.harnessWorkbenches = new WorkbenchService({ projectId: manifest.id, events: this.events, worktables: this.worktables });
+    this.scientificKernel = new ScientificKernelStore({ projectId: manifest.id, events: this.events });
+    this.generatedAppBlueprints = new GeneratedAppBlueprintService({
+      projectId: manifest.id,
+      events: this.events,
+      createArtifact: ({ blueprint, files }, actor) => {
+        const artifact = this.research.createObject({
+          type: 'artifact',
+          title: `${blueprint.title} · 生成应用包`,
+          status: 'active',
+          attributes: { kind: 'generated-workbench-app', blueprintId: blueprint.id },
+          attachments: [],
+        }, actor, blueprint.id);
+        const revision = this.artifactRevisions.create({
+          artifactId: artifact.id,
+          files: files.map((file) => ({ role: 'output', name: file.name, content: file.content, mediaType: file.mediaType })),
+          provenance: {
+            traceId: blueprint.id,
+            sessionId: this.#activeSessionId,
+            agentId: this.agents.primary()?.id ?? 'local-user',
+            tool: 'generated-app.build',
+            inputObjectIds: [],
+            inputFileHashes: {},
+          },
+        }, actor);
+        return { artifactId: artifact.id, revisionId: revision.id };
+      },
+      publish: (blueprint, actor) => {
+        if (!blueprint.artifact) throw new Error('生成应用缺少构建产物');
+        return this.generatedApps.publish({
+          title: blueprint.title,
+          artifactId: blueprint.artifact.artifactId,
+          revisionId: blueprint.artifact.revisionId,
+          entry: blueprint.entry,
+          networkDomains: blueprint.networkDomains,
+          hostCapabilities: blueprint.hostCapabilities,
+        }, actor);
+      },
+      mount: (blueprint, actor, conversationId) => {
+        if (conversationId) this.persistSessionForWorkbenchBinding(conversationId, actor);
+        this.harnessWorkbenches.register([blueprint]);
+        return this.harnessWorkbenches.create({ blueprintId: blueprint.id, ...(conversationId ? { primaryConversationId: conversationId } : {}) }, actor);
+      },
+      generateCode: async (blueprint, actor) => {
+        if (this.isDemoMode()) return undefined;
+        const model = this.availableModel(this.#harnessSettings.utilityModel);
+        const responseSchema: JsonSchema = {
+          type: 'object',
+          properties: {
+            body: { type: 'string', minLength: 1, maxLength: 300_000 },
+            style: { type: 'string', maxLength: 200_000 },
+            script: { type: 'string', maxLength: 300_000 },
+          },
+          required: ['body', 'style', 'script'], additionalProperties: false,
+        };
+        const generation = await this.modelGenerations.runStructured('sci.generated-app-builder', {
+          model,
+          purpose: 'generated-workbench-app-code',
+          messages: [
+            { role: 'system', content: '你是 Sci Workplace 的受限前端代码生成器。根据已确认的蓝图生成一个无依赖、离线、可访问的科研交互界面。body 只含 section 内部 HTML，不得含 script/style/meta/link/iframe、事件属性或 URL；style 只含局部 CSS，不得 @import；script 使用原生 DOM API，不得联网、动态执行代码、访问父窗口或持久存储。所有按钮必须可实际操作。' },
+            { role: 'user', content: `用户提示词：\n${blueprint.prompt}\n\n已确认生成规格：\n${JSON.stringify(blueprint.generationSpec ?? {})}\n\n应用标题：${blueprint.title}` },
+          ],
+          responseSchema,
+          reasoningEffort: 'medium',
+          maxOutputTokens: 16_000,
+          cacheKey: `generated-app:${blueprint.id}:${createHash('sha256').update(blueprint.prompt).digest('hex')}`,
+          inputHashes: [createHash('sha256').update(blueprint.prompt).digest('hex')],
+          sourceReferences: [{ id: `generated-app-prompt:${blueprint.id}`, kind: 'user_input', label: '用户确认的生成应用提示词' }],
+          disclosure: { mode: 'snippet', fields: ['prompt', 'confirmed-generation-spec'] },
+        }, actor);
+        if (generation.status !== 'completed' || !isRecord(generation.json)) throw new Error(generation.failureReason ?? generation.error ?? '生成应用代码模型调用失败');
+        const body = generation.json.body;
+        const style = generation.json.style;
+        const script = generation.json.script;
+        if (typeof body !== 'string' || typeof style !== 'string' || typeof script !== 'string') throw new Error('生成应用代码没有通过结构化输出检查');
+        return { generationId: generation.id, body, style, script };
+      },
+    });
+    this.toolchainAdapters = new ToolchainAdapterService({
+      projectId: manifest.id,
+      events: this.events,
+      jobs: this.jobs,
+      onChanged: () => { if (this.toolchainAdapters) this.emitToolRuns(); },
+      importOutputs: async (run, job, actor) => {
+        if (job.outputs.length === 0) return [];
+        const artifact = this.research.createObject({
+          type: 'artifact',
+          title: `${run.adapterId} · ${run.operationId}`,
+          status: 'active',
+          attributes: { kind: 'toolchain-output', adapterId: run.adapterId, operationId: run.operationId, jobId: job.id },
+          attachments: [],
+        }, actor, job.spec.traceId ?? run.id);
+        const revision = this.artifactRevisions.create({
+          artifactId: artifact.id,
+          jobId: job.id,
+          files: job.outputs.map((output) => ({ role: output.role, ref: output.ref, name: basename(output.path), ...(output.mediaType ? { mediaType: output.mediaType } : {}) })),
+          provenance: {
+            traceId: job.spec.traceId ?? run.id,
+            sessionId: this.#activeSessionId,
+            agentId: job.spec.agentId ?? this.agents.primary()?.id ?? 'local-user',
+            tool: `${run.adapterId}:${run.operationId}`,
+            ...(job.spec.pluginId ? { plugin: { id: job.spec.pluginId, version: this.plugins.versionOf(job.spec.pluginId) ?? 'unknown' } } : {}),
+            inputObjectIds: [],
+            inputFileHashes: {},
+          },
+        }, actor);
+        const archived = this.artifactRevisions.archive(revision.id, actor, true);
+        if (job.spec.worktableInstanceId) {
+          const workbench = this.harnessWorkbenches.inspect(job.spec.worktableInstanceId);
+          const targetRole = workbench.slots.find((slot) => slot.role === 'output' && slot.autoMount && slot.accepts.includes('artifact'))?.role
+            ?? workbench.slots.find((slot) => slot.autoMount && slot.accepts.includes('artifact'))?.role;
+          if (!targetRole) throw new Error('Workbench 没有声明可自动挂载工具链产物的角色槽位');
+          this.harnessWorkbenches.mount({
+            schemaVersion: 1,
+            idempotencyKey: `tool-run:${run.id}:mount`,
+            instanceId: job.spec.worktableInstanceId,
+            targetRole,
+            artifact: { artifactId: artifact.id, revisionId: archived.id },
+            title: artifact.title,
+          }, actor);
+        }
+        this.emitResearch();
+        this.emitArtifactRevisions();
+        this.emitWorktable();
+        this.emitWorkbenchV1();
+        return [archived.id];
+      },
+    });
+    this.paperReaders = new PaperReaderService({
+      projectId: manifest.id,
+      events: this.events,
+      jobs: this.jobs,
+      kernel: this.scientificKernel,
+      resolveRoot: (rootId, intent) => this.resolveWorkbenchRoot(rootId, intent),
+      toolchainAvailable: () => this.toolchains.list().some((toolchain) => toolchain.id === 'openlab.reader-runtime' && toolchain.status === 'available'),
+      createReportArtifact: (input, actor) => {
+        const artifact = this.research.createObject({
+          type: 'artifact',
+          title: input.title,
+          status: 'active',
+          attributes: { kind: 'paper-deep-read-report-v2', schema: 'openscientific.fine-reading-report/2', workbenchInstanceId: input.instanceId },
+          attachments: [],
+        }, actor, `paper-reader:${input.instanceId}`);
+        const revision = this.artifactRevisions.create({
+          artifactId: artifact.id,
+          files: input.files ?? [
+            { role: 'output', name: 'deep-read-report.md', content: input.markdown, mediaType: 'text/markdown' },
+            { role: 'output', name: 'deep-read-report.json', content: input.json, mediaType: 'application/json' },
+            { role: 'mapping', name: 'reader_document.json', ref: input.parsedRef, mediaType: 'application/json' },
+          ],
+          provenance: {
+            traceId: `paper-reader:${input.instanceId}`,
+            sessionId: this.#activeSessionId,
+            agentId: this.agents?.primary()?.id ?? 'local-user',
+            tool: 'sci.paper-reader:deep-read-v2',
+            plugin: { id: 'sci.paper-reader', version: '2.0.0' },
+            inputObjectIds: [],
+            inputFileHashes: {},
+          },
+        }, actor);
+        const archived = this.artifactRevisions.archive(revision.id, actor, true);
+        this.emitResearch();
+        this.emitArtifactRevisions();
+        return { artifactId: artifact.id, revisionId: archived.id };
+      },
+      mountReport: (instanceId, artifact, title, actor) => {
+        this.harnessWorkbenches.mount({
+          schemaVersion: 1,
+          idempotencyKey: `paper-reader:${instanceId}:report:${artifact.revisionId}`,
+          instanceId,
+          targetRole: 'analysis',
+          artifact,
+          title,
+          presentation: { role: 'output' },
+        }, actor);
+        this.emitWorktable();
+        this.emitWorkbenchV1();
+      },
+      listAnnotations: () => this.annotations.list(),
+      createAnnotation: (input, actor) => {
+        const annotation = this.annotations.create(input, actor);
+        this.emitAnnotations();
+        return annotation;
+      },
+      textModel: () => this.isDemoMode() ? 'openlab-demo' : this.availableModel(this.#harnessSettings.paperReaderTextModel),
+      visionModel: () => this.isDemoMode() ? undefined : this.availableVisionModel(this.#harnessSettings.paperReaderVisionModel),
+      translate: async (input, actor, signal) => {
+        return await runPaperReaderTranslation(this.modelGenerations, input, actor, signal);
+      },
+      documentProfile: async (input, actor, signal) => await runPaperReaderDocumentProfile(this.modelGenerations, input, actor, signal),
+      terminology: async (input, actor, signal) => await runPaperReaderTerminology(this.modelGenerations, input, actor, signal),
+      sectionDigest: async (input, actor, signal) => await runPaperReaderSectionDigest(this.modelGenerations, input, actor, signal),
+      figureAnalysis: async (input, actor, signal) => await runPaperReaderFigureAnalysis(this.modelGenerations, input, actor, signal),
+      formulaAnalysis: async (input, actor, signal) => await runPaperReaderFormulaAnalysis(this.modelGenerations, input, actor, signal),
+      claimEvidence: async (input, actor, signal) => await runPaperReaderClaimEvidence(this.modelGenerations, input, actor, signal),
+      reproduction: async (input, actor, signal) => await runPaperReaderReproduction(this.modelGenerations, input, actor, signal),
+      synthesis: async (input, actor, signal) => await runPaperReaderSynthesis(this.modelGenerations, input, actor, signal),
+      question: async (input, actor, signal) => await runPaperReaderQuestion(this.modelGenerations, input, actor, signal),
+      onChanged: () => {
+        if (this.paperReaders) this.emitPaperReaders();
+        if (this.scientificKernel) this.emitScientificKernel();
+      },
+    });
     this.terminals = new TerminalService({
       projectId: manifest.id,
       events: this.events,
@@ -1022,6 +1261,11 @@ export class OpenLabRuntime {
     this.plugins = new PluginManager({
       userRoot: this.paths.plugins, projectRoot: config.projectRoot, projectId: manifest.id, registry: this.tools,
       hostHandler: async (request) => await this.handlePluginHostCall(request),
+    });
+    const catalogKey = process.env.SCI_WORKPLACE_PLUGIN_CATALOG_PUBLIC_KEY?.replaceAll('\\n', '\n');
+    this.pluginMarketplace = new CuratedPluginMarketplace({
+      cachePath: join(this.paths.home, 'marketplace', 'catalog.signed.json'),
+      trustedKeys: new Map(catalogKey ? [['sci-workplace-curated-v1', catalogKey]] : []),
     });
     this.mcp = new McpManager({ registry: this.tools, resolveCredential: (id) => this.#credentials[id] });
     this.pricing = new DeepSeekPricingTable(this.paths.deepSeekPricing);
@@ -1078,7 +1322,7 @@ export class OpenLabRuntime {
     }
     this.#activeSessionId = storedSession && this.#sessions.some((session) => session.id === storedSession)
       ? storedSession
-      : this.createSessionRecord('新研究对话', false, this.agents.primary()?.id).id;
+      : this.createSessionRecord('新研究对话', config.deferInitialSession === true && this.#sessions.length === 0, this.agents.primary()?.id).id;
     this.#sessionScope = this.#projectScope.createChild(`session:${this.#activeSessionId}`, 'session');
     this.loadActiveSession();
     this.logger.info('runtime.created', { projectId: this.project.id, projectRoot: this.project.rootPath, mode: this.#provider.id });
@@ -1100,8 +1344,20 @@ export class OpenLabRuntime {
     this.#models = await this.#provider.listModels().catch(() => []);
     this.registerTools();
     this.initializeTeam();
+    for (const plugin of this.plugins.list().filter((candidate) => candidate.enabled)) {
+      const reason = this.pluginMarketplace.revocationReason(plugin.manifest.id, plugin.manifest.version)
+        ?? (!this.#harnessSettings.developerMode && !this.isTrustedPluginInstallation(plugin)
+          ? '未签名本地插件只能在显式开发者模式下启动'
+          : undefined);
+      if (!reason) continue;
+      await this.plugins.deactivate(plugin.manifest.id);
+      this.events.append({
+        streamId: `project:${this.project.id}`, kind: 'plugin.revoked_disabled', actor: SYSTEM_ACTOR,
+        payload: toJson({ id: plugin.manifest.id, version: plugin.manifest.version, reason }),
+      });
+    }
     await this.plugins.activateEnabled();
-    this.migrateLegacyWorkbenches();
+    this.syncPluginBlueprints();
     this.workflows.resumeInterrupted();
     this.startSkillWatch();
     for (const state of this.#mcpServers.filter((item) => item.config.enabled)) {
@@ -1174,15 +1430,25 @@ export class OpenLabRuntime {
       workbenchContributions: this.workbenchContributions(),
       worktable: this.worktables.snapshot(),
       worktableTemplates: this.worktableTemplates(),
+      workbenchBlueprints: this.harnessWorkbenches.blueprints(),
+      workbenchInstances: this.harnessWorkbenches.list(),
+      layoutProposals: this.harnessWorkbenches.proposals(),
+      evidenceAnchors: this.scientificKernel.anchors(),
+      runRecords: this.scientificKernel.runs(),
+      reviewRequests: this.scientificKernel.reviews(),
       browserProfiles: structuredClone(this.#browserProfiles),
       browserSessions: structuredClone(this.#browserSessions),
       generatedApps: this.generatedApps.list(),
+      generatedAppBlueprints: this.generatedAppBlueprints.list(),
       annotations: this.annotations.list(),
       annotationSets: this.annotations.sets(),
       artifactRevisions: this.artifactRevisions.list(),
       sourceMaps: this.artifactRevisions.sourceMaps(),
       jobs: this.listJobs(),
       toolchains: this.toolchains.list(),
+      toolchainAdapters: this.toolchainAdapters.manifests(),
+      toolRuns: this.toolchainAdapters.runs(),
+      paperReaders: this.paperReaders.list(),
       workspace: this.#workspace.snapshot(),
       conversationFiles: this.#workspace.conversationFiles(),
       turnVariants: structuredClone(this.#turnVariants),
@@ -1214,6 +1480,7 @@ export class OpenLabRuntime {
         ...(plugin.error ? { error: plugin.error } : {}),
         settings: this.plugins.settings(plugin.manifest.id),
       })),
+      pluginCatalog: { status: this.pluginMarketplace.status(), entries: this.pluginMarketplace.entries() },
       pendingApprovals: [...this.#pendingApprovals.values()].map((pending) => structuredClone(pending.request)),
       providers: this.#providerManager?.states() ?? [],
       models: structuredClone(this.#models),
@@ -1681,7 +1948,8 @@ export class OpenLabRuntime {
     return this.channels.exportMarkdown(id, (agentId) => this.agents.requireDefinition(agentId, true).name);
   }
 
-  setHarnessSettings(patch: Partial<HarnessSettings>): HarnessSettings {
+  async setHarnessSettings(patch: Partial<HarnessSettings>): Promise<HarnessSettings> {
+    const developerModeWasEnabled = this.#harnessSettings.developerMode;
     this.#harnessSettings = normalizeHarnessSettings({
       ...this.#harnessSettings,
       ...patch,
@@ -1697,6 +1965,15 @@ export class OpenLabRuntime {
       streamId: `project:${this.project.id}`, kind: 'settings.harness_changed', actor: USER_ACTOR,
       payload: toJson(this.#harnessSettings),
     });
+    if (developerModeWasEnabled && !this.#harnessSettings.developerMode) {
+      const disabled = await this.disableUntrustedPlugins();
+      if (disabled.length > 0) {
+        this.syncPluginBlueprints();
+        this.notifyCapabilities(`开发者模式已关闭；${disabled.length} 个未签名插件已停用`);
+        this.emitWorktable();
+        this.emitWorkbenchV1();
+      }
+    }
     return structuredClone(this.#harnessSettings);
   }
 
@@ -2239,10 +2516,107 @@ export class OpenLabRuntime {
     };
   }
 
+  proposeGeneratedWorkbench(prompt: string) {
+    const blueprint = this.generatedAppBlueprints.propose(prompt, USER_ACTOR);
+    this.emitGeneratedBlueprints();
+    return blueprint;
+  }
+
+  async decideGeneratedWorkbench(id: string, accepted: boolean) {
+    const confirmed = this.generatedAppBlueprints.confirm(id, accepted, USER_ACTOR);
+    const blueprint = accepted ? await this.generatedAppBlueprints.build(id, USER_ACTOR) : confirmed;
+    this.emitGeneratedBlueprints();
+    this.emitArtifactRevisions();
+    return blueprint;
+  }
+
+  acceptGeneratedWorkbench(id: string, confirmed: boolean) {
+    const result = this.generatedAppBlueprints.accept(id, confirmed, USER_ACTOR, this.#activeSessionId);
+    this.emitGeneratedBlueprints();
+    this.emitGeneratedApps();
+    this.emitWorktable();
+    this.emitWorkbenchV1();
+    return result;
+  }
+
+  readGeneratedBlueprintAsset(id: string, requestPath: string): { bytes: Buffer; mediaType: string; etag: string } {
+    const blueprint = this.generatedAppBlueprints.get(id);
+    if (blueprint.status !== 'preview' || !blueprint.artifact) throw new Error('生成应用尚未进入沙箱预览阶段');
+    const path = requestPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '');
+    if (!path || path.split('/').some((part) => !part || part === '.' || part === '..') || /[:\0]/u.test(path)) throw new Error('生成应用预览路径无效');
+    const revision = this.artifactRevisions.list(blueprint.artifact.artifactId).find((candidate) => candidate.id === blueprint.artifact!.revisionId);
+    const file = revision?.files.find((candidate) => (candidate.role === 'output' || candidate.role === 'source') && candidate.name.replaceAll('\\', '/') === path);
+    if (!revision || !file) throw new Error('生成应用预览资源不属于构建产物');
+    if (/\.(?:exe|dll|com|bat|cmd|ps1|msi|node)$/iu.test(file.name)) throw new Error('生成应用预览禁止可执行文件');
+    const absolute = file.archivedPath
+      ? new PathGuard(this.project.rootPath).resolveExisting(file.archivedPath)
+      : file.ref ? new PathGuard(this.resolveWorkbenchRoot(file.ref.rootId, 'read')).resolveExisting(file.ref.path) : undefined;
+    if (!absolute) throw new Error('生成应用预览资源没有可读取的修订引用');
+    const stats = statSync(absolute);
+    if (!stats.isFile() || stats.size !== file.size || stats.size > 50 * 1024 * 1024) throw new Error('生成应用预览资源大小无效');
+    const bytes = readFileSync(absolute);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (sha256 !== file.sha256) throw new Error('生成应用预览资源完整性校验失败');
+    return { bytes, mediaType: generatedAppMediaType(path), etag: `"sha256-${sha256}"` };
+  }
+
   installToolchain(sourcePath: string): ToolchainDescriptor {
     const descriptor = this.toolchains.install(sourcePath, USER_ACTOR);
     this.emitToolchains();
     return descriptor;
+  }
+
+  runToolchainAdapter(input: { adapterId: string; operationId: string; values: Record<string, JsonValue>; instanceId?: string; confirmed: boolean }) {
+    const run = this.toolchainAdapters.run({ ...input, traceId: randomUUID(), agentId: this.agents.primary()?.id ?? 'local-user' }, USER_ACTOR);
+    this.emitToolRuns();
+    return run;
+  }
+
+  cancelToolchainRun(id: string) {
+    const run = this.toolchainAdapters.cancel(id, USER_ACTOR);
+    this.emitToolRuns();
+    return run;
+  }
+
+  toolchainRunLog(id: string, offset = 0) { return this.toolchainAdapters.log(id, offset); }
+
+  async updatePluginCatalogFromFile(path: string) {
+    const catalog = this.pluginMarketplace.updateFromFile(path);
+    this.events.append({
+      streamId: `project:${this.project.id}`, kind: 'plugin-catalog.updated', actor: USER_ACTOR,
+      provenanceRefs: [catalog.keyId, String(catalog.index.sequence)], payload: toJson({ keyId: catalog.keyId, index: catalog.index }),
+    });
+    const disabled: string[] = [];
+    for (const plugin of this.plugins.list().filter((candidate) => candidate.enabled)) {
+      const reason = this.pluginMarketplace.revocationReason(plugin.manifest.id, plugin.manifest.version);
+      if (!reason) continue;
+      await this.plugins.deactivate(plugin.manifest.id);
+      disabled.push(plugin.manifest.id);
+      this.events.append({
+        streamId: `project:${this.project.id}`, kind: 'plugin.revoked_disabled', actor: SYSTEM_ACTOR,
+        payload: toJson({ id: plugin.manifest.id, version: plugin.manifest.version, reason }),
+      });
+    }
+    if (disabled.length > 0) {
+      this.syncPluginBlueprints();
+      this.notifyCapabilities(`策展目录已撤回并停用 ${disabled.length} 个插件`);
+      this.emitWorktable();
+      this.emitWorkbenchV1();
+    }
+    return { status: this.pluginMarketplace.status(), entries: this.pluginMarketplace.entries() };
+  }
+
+  async installCuratedPluginPackage(entryId: string, packagePath: string, scope: 'user' | 'project' = 'project') {
+    const entry = this.pluginMarketplace.entries().find((candidate) => candidate.id === entryId);
+    if (!entry) throw new Error('策展目录中不存在该插件，或该版本已被撤回');
+    this.pluginMarketplace.verifyPackage(packagePath, entry);
+    const inspection = this.plugins.inspectSource(packagePath);
+    if (inspection.manifest.id !== entry.id || inspection.manifest.version !== entry.version) throw new Error('插件包清单身份与签名目录不一致');
+    if (inspection.manifest.apiVersion !== 4) throw new Error('策展目录只接受 Plugin API v4 插件');
+    if (JSON.stringify([...inspection.manifest.permissions].sort()) !== JSON.stringify([...entry.permissions].sort())) {
+      throw new Error('插件包权限与签名目录声明不一致');
+    }
+    return await this.installPluginPackage(packagePath, scope, undefined, true);
   }
 
   openWorkbench(input: { title: string; workbenchId: string; document?: DocumentRevisionRef; artifactId?: string; artifactRevisionId?: string; activeViewId?: string }): WorkbenchState {
@@ -2254,14 +2628,19 @@ export class OpenLabRuntime {
       ...input, activeViewId,
       ...(contribution.pluginId ? { pluginId: contribution.pluginId } : {}),
     }, USER_ACTOR);
-    const legacyTab = state.tabs.find((tab) => tab.id === state.activeTabId);
-    if (legacyTab) this.worktables.syncLegacy(legacyTab, contribution, USER_ACTOR);
     this.emitWorkbench();
-    this.emitWorktable();
     return state;
   }
 
   pluginPanelContext(pluginId: string, panelId: string, tabId: string, worktableInstanceId?: string, paneId?: string): JsonValue {
+    if (pluginId === 'sci.paper-reader') {
+      if (!worktableInstanceId || (panelId !== 'source' && panelId !== 'analysis')) throw new Error('论文精读面板必须挂载在自己的 Workbench 实例中');
+      const instance = this.worktables.snapshot().instances.find((candidate) => candidate.id === worktableInstanceId && candidate.templateId === 'sci.paper-reader:deep-read');
+      const pane = instance?.panes.find((candidate) => candidate.id === paneId);
+      const tab = pane?.tabs.find((candidate) => candidate.id === tabId);
+      if (!instance || !pane || !tab || tab.content.kind !== 'plugin-panel' || tab.content.pluginId !== pluginId || tab.content.panelId !== panelId) throw new Error('论文精读面板与 Workbench 标签不匹配');
+      return toJson(this.paperReaders.context(instance.id, toJson(this.worktables.snapshot().reveal ?? null)));
+    }
     const plugin = this.plugins.list().find((candidate) => candidate.manifest.id === pluginId && candidate.enabled);
     const panel = plugin?.manifest.contributes.uiPanels?.find((candidate) => candidate.id === panelId);
     if (!plugin || !plugin.manifest.permissions.includes('ui') || !panel) throw new Error('插件面板不存在或未启用');
@@ -2355,6 +2734,7 @@ export class OpenLabRuntime {
 
   async executePluginPanelTool(input: { pluginId: string; panelId: string; tabId: string; worktableInstanceId?: string; paneId?: string; tool: string; params: Record<string, JsonValue>; confirmed: boolean }): Promise<ToolExecutionResult> {
     this.pluginPanelContext(input.pluginId, input.panelId, input.tabId, input.worktableInstanceId, input.paneId);
+    if (input.pluginId === 'sci.paper-reader') return this.executePaperReaderPanelTool(input);
     const plugin = this.plugins.list().find((candidate) => candidate.manifest.id === input.pluginId && candidate.enabled);
     const panel = plugin?.manifest.contributes.uiPanels?.find((candidate) => candidate.id === input.panelId);
     if (!panel?.tools?.includes(input.tool)) throw new Error(`插件面板未声明工具：${input.tool}`);
@@ -2437,33 +2817,18 @@ export class OpenLabRuntime {
     if (!pdfView) throw new Error('当前工作台没有 PDF 视图');
     this.workbenches.setView(tab.id, pdfView.id, USER_ACTOR);
     const state = this.workbenches.reveal(tab.id, input.document, input.selector, USER_ACTOR);
-    const projectedTab = state.tabs.find((candidate) => candidate.id === tab.id);
-    if (projectedTab && contribution) this.worktables.syncLegacy(projectedTab, contribution, USER_ACTOR);
     this.emitWorkbench();
-    this.emitWorktable();
     return state;
   }
 
   closeWorkbench(tabId: string): WorkbenchState { const state = this.workbenches.close(tabId, USER_ACTOR); this.emitWorkbench(); return state; }
   activateWorkbench(tabId: string): WorkbenchState {
     const state = this.workbenches.activate(tabId, USER_ACTOR);
-    const tab = state.tabs.find((candidate) => candidate.id === tabId);
-    const contribution = tab ? this.workbenchContributions().find((candidate) => candidate.id === tab.workbenchId) : undefined;
-    if (tab && contribution) {
-      this.worktables.syncLegacy(tab, contribution, USER_ACTOR);
-      this.emitWorktable();
-    }
     this.emitWorkbench();
     return state;
   }
   setWorkbenchView(tabId: string, viewId: string): WorkbenchState {
     const state = this.workbenches.setView(tabId, viewId, USER_ACTOR);
-    const tab = state.tabs.find((candidate) => candidate.id === tabId);
-    const contribution = tab ? this.workbenchContributions().find((candidate) => candidate.id === tab.workbenchId) : undefined;
-    if (tab && contribution) {
-      this.worktables.syncLegacy(tab, contribution, USER_ACTOR);
-      this.emitWorktable();
-    }
     this.emitWorkbench();
     return state;
   }
@@ -2474,25 +2839,119 @@ export class OpenLabRuntime {
   }
 
   createWorktable(input: { templateId?: string; title?: string; boundSessionId?: string; inputs?: Record<string, JsonValue> }): WorktableInstance {
-    const templates = this.worktableTemplates();
-    const template = input.templateId
-      ? templates.find((candidate) => candidate.id === input.templateId)
-      : templates.find((candidate) => candidate.id === CORE_WORKTABLE_TEMPLATES[0]!.id) ?? templates[0];
-    if (!template) throw new Error('没有可用的工作台模板');
+    this.syncPluginBlueprints();
+    const blueprints = this.harnessWorkbenches.blueprints();
+    const blueprint = input.templateId
+      ? blueprints.find((candidate) => candidate.id === input.templateId)
+      : blueprints.find((candidate) => candidate.id === CORE_WORKBENCH_BLUEPRINTS[0]!.id) ?? blueprints[0];
+    if (!blueprint) throw new Error('没有可用的 WorkbenchBlueprint');
     const boundSessionId = input.boundSessionId ?? this.#activeSessionId;
-    if (!this.#sessions.some((session) => session.id === boundSessionId && session.status !== 'archived')) throw new Error('绑定会话不存在或已归档');
-    const instance = this.worktables.create(template, {
+    this.persistSessionForWorkbenchBinding(boundSessionId, USER_ACTOR);
+    let instance = this.harnessWorkbenches.create({
+      blueprintId: blueprint.id,
       ...(input.title ? { title: input.title } : {}),
-      boundSessionId,
+      primaryConversationId: boundSessionId,
       ...(input.inputs ? { inputs: input.inputs } : {}),
     }, USER_ACTOR);
+    if (blueprint.id === 'sci.paper-reader:deep-read') {
+      const reader = this.paperReaders.configure(instance, USER_ACTOR);
+      if (reader.mainDocument) {
+        const sourcePane = instance.panes.find((candidate) => candidate.id === 'source') ?? instance.panes[0];
+        if (!sourcePane) throw new Error('论文精读 Workbench 缺少来源窗格');
+        const mainTab = this.worktables.mountTab(instance.id, sourcePane.id, {
+          title: '主文 PDF',
+          content: { kind: 'document', target: reader.mainDocument },
+          pinned: true,
+        }, USER_ACTOR);
+        if (reader.supportingDocument) {
+          this.worktables.mountTab(instance.id, sourcePane.id, {
+            title: 'SI PDF',
+            content: { kind: 'document', target: reader.supportingDocument },
+            pinned: true,
+          }, USER_ACTOR);
+          this.worktables.activateTab(instance.id, sourcePane.id, mainTab.id, USER_ACTOR);
+        }
+        instance = this.harnessWorkbenches.inspect(instance.id);
+      }
+    }
     this.emitWorktable();
+    this.emitWorkbenchV1();
+    if (blueprint.id === 'sci.paper-reader:deep-read') this.emitPaperReaders();
     return instance;
+  }
+
+  private async executePaperReaderPanelTool(input: { worktableInstanceId?: string; tool: string; params: Record<string, JsonValue>; confirmed: boolean }): Promise<ToolExecutionResult> {
+    const aliases: Record<string, string> = {
+      'paper.parse': 'paper.prepare',
+      'paper.deep-read': 'paper.start',
+      'paper.regenerate-selection': 'paper.regenerate',
+      'paper.export-v1': 'paper.export',
+    };
+    input = { ...input, tool: aliases[input.tool] ?? input.tool };
+    const instanceId = input.worktableInstanceId;
+    if (!instanceId) throw new Error('论文精读工具缺少 Workbench 实例');
+    const reader = this.paperReaders.get(instanceId);
+    const preview = this.paperReaders.callPreview(instanceId);
+    const reusableAuthorization = reader.batchAuthorization?.status === 'active'
+      && reader.batchAuthorization.instanceId === reader.instanceId
+      && reader.batchAuthorization.documentSetHash === reader.documentSetHash
+      && reader.batchAuthorization.textModel === preview.textModel
+      && (reader.batchAuthorization.visionModel ?? '') === (preview.visionModel ?? '');
+    if (['paper.start', 'paper.resume'].includes(input.tool) && !reusableAuthorization && !input.confirmed) {
+      throw new Error(`论文精读工具 ${input.tool} 需要用户明确确认`);
+    }
+    let value: unknown;
+    if (input.tool === 'paper.prepare') value = this.paperReaders.prepare(instanceId, USER_ACTOR);
+    else if (input.tool === 'paper.start') value = this.paperReaders.start(instanceId, USER_ACTOR, input.confirmed);
+    else if (input.tool === 'paper.resume') value = this.paperReaders.resume(instanceId, USER_ACTOR, input.confirmed);
+    else if (input.tool === 'paper.cancel') value = this.paperReaders.cancel(instanceId, USER_ACTOR);
+    else if (input.tool === 'paper.auto-follow') value = this.paperReaders.setAutoFollow(instanceId, input.params.enabled === true, USER_ACTOR);
+    else if (input.tool === 'paper.select-block') {
+      if (typeof input.params.blockId !== 'string') throw new Error('缺少来源块 ID');
+      value = this.paperReaders.selectBlock(instanceId, input.params.blockId, USER_ACTOR, typeof input.params.document === 'string' ? input.params.document : 'main');
+    } else if (input.tool === 'paper.freeze-term') {
+      if (typeof input.params.source !== 'string' || typeof input.params.translation !== 'string') throw new Error('术语冻结参数无效');
+      value = this.paperReaders.freezeTerm(instanceId, input.params.source, input.params.translation, USER_ACTOR);
+    } else if (input.tool === 'paper.translate') {
+      if (!Array.isArray(input.params.blockIds) || !input.params.blockIds.every((id) => typeof id === 'string')) throw new Error('翻译来源块参数无效');
+      value = await this.paperReaders.translateBlocks(instanceId, input.params.blockIds, USER_ACTOR, typeof input.params.document === 'string' ? input.params.document : 'main');
+    } else if (input.tool === 'paper.annotate') {
+      if (typeof input.params.blockId !== 'string' || typeof input.params.comment !== 'string') throw new Error('批注参数无效');
+      value = this.paperReaders.annotate(instanceId, typeof input.params.document === 'string' ? input.params.document : 'main', input.params.blockId, input.params.comment, USER_ACTOR);
+    } else if (input.tool === 'paper.ask') {
+      if (typeof input.params.question !== 'string') throw new Error('来源问答参数无效');
+      value = await this.paperReaders.ask(instanceId, input.params.question, USER_ACTOR);
+    } else if (input.tool === 'paper.regenerate') {
+      if (!Array.isArray(input.params.blockIds) || !input.params.blockIds.every((id) => typeof id === 'string')) throw new Error('局部重新生成参数无效');
+      value = this.paperReaders.regenerate(instanceId, input.params.blockIds, USER_ACTOR, input.confirmed);
+    } else if (input.tool === 'paper.regenerate-module') {
+      const modules: PaperReaderModuleV2[] = ['terminology', 'bilingual-translation', 'section-digest', 'figure-analysis', 'formula-analysis', 'claim-evidence', 'reproduction', 'synthesis'];
+      if (typeof input.params.module !== 'string' || !modules.includes(input.params.module as PaperReaderModuleV2)) throw new Error('局部重跑模块无效');
+      const targetIds = Array.isArray(input.params.targetIds) && input.params.targetIds.every((id) => typeof id === 'string') ? input.params.targetIds as string[] : [];
+      value = this.paperReaders.regenerateModule(instanceId, input.params.module as PaperReaderModuleV2, targetIds, USER_ACTOR, input.confirmed);
+    } else if (input.tool === 'paper.regenerate-figure') {
+      if (typeof input.params.figureId !== 'string') throw new Error('逐图重跑缺少图表 ID');
+      value = this.paperReaders.regenerateFigure(instanceId, input.params.figureId, USER_ACTOR, input.confirmed);
+    } else if (input.tool === 'paper.document.attach') {
+      value = this.paperReaders.attachSupplement(instanceId, input.params.document ?? input.params, USER_ACTOR);
+    } else if (input.tool === 'paper.document.remove') {
+      if (typeof input.params.documentId !== 'string') throw new Error('移除 SI 缺少文档 ID');
+      value = this.paperReaders.removeSupplement(instanceId, input.params.documentId, USER_ACTOR);
+    } else if (input.tool === 'paper.document.get') {
+      value = this.paperReaders.context(instanceId, null);
+    } else if (input.tool === 'paper.export') value = this.paperReaders.export(instanceId, USER_ACTOR);
+    else throw new Error(`论文精读面板未声明工具：${input.tool}`);
+    this.emitPaperReaders();
+    this.emitScientificKernel();
+    return {
+      callId: randomUUID(), ok: true, content: `${input.tool} 已完成`, artifactIds: input.tool === 'paper.export' && isRecord(value) && typeof value.artifactId === 'string' ? [value.artifactId] : [], metadata: { instanceId, tool: input.tool },
+    };
   }
 
   activateWorktable(instanceId: string): WorktableState {
     const state = this.worktables.activate(instanceId, USER_ACTOR);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return state;
   }
 
@@ -2509,7 +2968,8 @@ export class OpenLabRuntime {
     artifactRevisionId?: string | null;
     ifRevision?: number;
   }): WorktableInstance {
-    if (typeof patch.boundSessionId === 'string' && !this.#sessions.some((session) => session.id === patch.boundSessionId && session.status !== 'archived')) throw new Error('绑定会话不存在或已归档');
+    if (patch.layout || patch.panes) throw new Error('共享布局结构不能直接修改；请先创建 LayoutProposal 并由用户确认差异');
+    if (typeof patch.boundSessionId === 'string') this.persistSessionForWorkbenchBinding(patch.boundSessionId, USER_ACTOR);
     if (patch.inputs) {
       const current = this.worktables.snapshot().instances.find((candidate) => candidate.id === instanceId);
       const template = current?.templateId ? this.worktableTemplates().find((candidate) => candidate.id === current.templateId) : undefined;
@@ -2518,6 +2978,7 @@ export class OpenLabRuntime {
     }
     const instance = this.worktables.patch(instanceId, patch, USER_ACTOR);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return instance;
   }
 
@@ -2528,36 +2989,61 @@ export class OpenLabRuntime {
     if (this.terminals.list().some((session) => session.worktableInstanceId === instanceId && session.status === 'running')) throw new Error('工作台仍有活动终端，关闭后才能归档');
     const instance = this.worktables.archive(instanceId, USER_ACTOR, ifRevision);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return instance;
   }
 
   restoreWorktable(instanceId: string, ifRevision?: number): WorktableInstance {
     const instance = this.worktables.restore(instanceId, USER_ACTOR, ifRevision);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return instance;
   }
 
   setWorktableLayout(instanceId: string, input: { layout: WorktableSplitNode; panes: WorktablePane[]; activePaneId?: string }): WorktableInstance {
-    const instance = this.worktables.setLayout(instanceId, input.layout, input.panes, input.activePaneId, USER_ACTOR);
+    void instanceId; void input;
+    throw new Error('共享布局结构不能直接修改；请通过 LayoutProposalV1 预览并确认差异');
+  }
+
+  proposeWorkbenchLayout(input: {
+    instanceId: string;
+    baseRevision: number;
+    title: string;
+    reason: string;
+    layout: WorktableSplitNode;
+    panes: WorktablePane[];
+    slots: WorkbenchSlotV1[];
+  }) {
+    const proposal = this.harnessWorkbenches.proposeLayout(input, USER_ACTOR);
+    this.emitWorkbenchV1();
+    return proposal;
+  }
+
+  decideWorkbenchLayoutProposal(proposalId: string, accepted: boolean) {
+    const proposal = this.harnessWorkbenches.decideLayout(proposalId, accepted, USER_ACTOR);
     this.emitWorktable();
-    return instance;
+    this.emitWorkbenchV1();
+    return proposal;
   }
 
   mountWorktableTab(instanceId: string, paneId: string, input: { title: string; content: WorktableContent; pinned?: boolean }): WorktableTab {
     const tab = this.worktables.mountTab(instanceId, paneId, input, USER_ACTOR);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return tab;
   }
 
   activateWorktableTab(instanceId: string, paneId: string, tabId: string): WorktableInstance {
     const instance = this.worktables.activateTab(instanceId, paneId, tabId, USER_ACTOR);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return instance;
   }
 
   closeWorktableTab(instanceId: string, paneId: string, tabId: string): WorktableInstance {
     const instance = this.worktables.closeTab(instanceId, paneId, tabId, USER_ACTOR);
     this.emitWorktable();
+    this.emitWorkbenchV1();
     return instance;
   }
 
@@ -2759,14 +3245,23 @@ export class OpenLabRuntime {
   }
 
   async installPlugin(sourcePath: string, scope: 'user' | 'project', signal?: AbortSignal): Promise<{ manifest: PluginManifest; enabled: boolean; trusted: boolean }> {
+    if (!this.#harnessSettings.developerMode) throw new Error('未签名本地插件只能在设置中显式开启开发者模式后安装');
+    return await this.installPluginPackage(sourcePath, scope, signal, false);
+  }
+
+  private async installPluginPackage(sourcePath: string, scope: 'user' | 'project', signal: AbortSignal | undefined, trusted: boolean): Promise<{ manifest: PluginManifest; enabled: boolean; trusted: boolean }> {
+    const inspection = this.plugins.inspectSource(sourcePath);
+    if (inspection.manifest.apiVersion !== 4 || inspection.manifest.schemaVersion !== 4) throw new Error('Sci Workplace 正式插件入口只接受 Plugin API v4');
     const installed = await this.plugins.install(sourcePath, scope, signal);
     this.events.append({
       streamId: `project:${this.project.id}`, kind: 'plugin.installed', actor: USER_ACTOR,
-      payload: toJson({ manifest: installed.manifest, scope, sha256: installed.sha256, trusted: false }),
+      payload: toJson({ manifest: installed.manifest, scope, sha256: installed.sha256, trusted }),
     });
+    this.syncPluginBlueprints();
     this.notifyCapabilities(`插件“${installed.manifest.name}”已安装`);
     this.emitWorktable();
-    return { manifest: installed.manifest, enabled: true, trusted: false };
+    this.emitWorkbenchV1();
+    return { manifest: installed.manifest, enabled: true, trusted };
   }
 
   inspectPluginSource(sourcePath: string) {
@@ -2847,6 +3342,15 @@ export class OpenLabRuntime {
   }
 
   async setPluginEnabled(id: string, enabled: boolean): Promise<void> {
+    if (enabled) {
+      const plugin = this.plugins.list().find((candidate) => candidate.manifest.id === id);
+      const version = plugin?.manifest.version;
+      const reason = this.pluginMarketplace.revocationReason(id, version);
+      if (reason) throw new Error(`插件 ${id}${version ? `@${version}` : ''} 已被策展目录撤回：${reason}`);
+      if (plugin && !this.#harnessSettings.developerMode && !this.isTrustedPluginInstallation(plugin)) {
+        throw new Error('未签名本地插件只能在显式开发者模式下启用');
+      }
+    }
     if (enabled) await this.plugins.activate(id);
     else await this.plugins.deactivate(id);
     const manifest = this.plugins.list().find((plugin) => plugin.manifest.id === id)?.manifest;
@@ -2854,8 +3358,10 @@ export class OpenLabRuntime {
       streamId: `project:${this.project.id}`, kind: enabled ? 'plugin.enabled' : 'plugin.disabled', actor: USER_ACTOR,
       payload: toJson({ id, ...(manifest ? { version: manifest.version, permissions: manifest.permissions } : {}) }),
     });
+    this.syncPluginBlueprints();
     this.notifyCapabilities(`插件“${manifest?.name ?? id}”已${enabled ? '启用' : '停用'}`);
     this.emitWorktable();
+    this.emitWorkbenchV1();
   }
 
   async updatePluginSettings(id: string, value: JsonValue): Promise<JsonValue> {
@@ -2868,6 +3374,12 @@ export class OpenLabRuntime {
   }
 
   async reloadPlugin(id: string): Promise<void> {
+    const current = this.plugins.list().find((plugin) => plugin.manifest.id === id);
+    if (current) {
+      const reason = this.pluginMarketplace.revocationReason(id, current.manifest.version);
+      if (reason) throw new Error(`插件 ${id}@${current.manifest.version} 已被策展目录撤回：${reason}`);
+      if (!this.#harnessSettings.developerMode && !this.isTrustedPluginInstallation(current)) throw new Error('未签名本地插件只能在显式开发者模式下热重载');
+    }
     try {
       await this.plugins.reload(id);
       const manifest = this.plugins.list().find((plugin) => plugin.manifest.id === id)?.manifest;
@@ -2894,6 +3406,7 @@ export class OpenLabRuntime {
   }
 
   readPluginPanel(pluginId: string, panelId: string): string {
+    if (pluginId === 'sci.paper-reader') return paperReaderPanelHtml(panelId);
     return this.plugins.readUiPanel(pluginId, panelId);
   }
 
@@ -4362,6 +4875,26 @@ export class OpenLabRuntime {
     return session;
   }
 
+  private persistSessionForWorkbenchBinding(id: string, actor: EventActor): SessionSummary {
+    const index = this.#sessions.findIndex((session) => session.id === id && session.status !== 'archived');
+    const session = this.#sessions[index];
+    if (!session) throw new Error('绑定会话不存在或已归档');
+    if (!session.temporary) return session;
+    const { temporary: _temporary, ...durable } = session;
+    this.events.persistTemporaryStream(`session:${id}`);
+    this.events.append({
+      streamId: `project:${this.project.id}`,
+      kind: 'session.created',
+      actor,
+      idempotencyKey: `session:${id}:created`,
+      payload: toJson(durable),
+    });
+    this.#sessions[index] = durable;
+    if (this.#activeSessionId === id) this.events.setValue(this.activeSessionSettingKey(), id);
+    this.emitSessions();
+    return durable;
+  }
+
   private discardTemporarySession(id: string): void {
     const index = this.#sessions.findIndex((session) => session.id === id && session.temporary);
     if (index < 0) return;
@@ -4614,33 +5147,34 @@ export class OpenLabRuntime {
     return [...structuredClone(CORE_WORKBENCHES), ...this.plugins.workbenches()];
   }
 
-  private worktableTemplates(): WorktableTemplateContribution[] {
-    const native = this.plugins.list()
-      .filter((plugin) => plugin.enabled)
-      .flatMap((plugin) => (plugin.manifest.contributes.worktableTemplates ?? []).map((template) => ({
-        ...structuredClone(template),
-        pluginId: plugin.manifest.id,
-      })));
-    const templates = [
-      ...structuredClone(CORE_WORKTABLE_TEMPLATES),
-      ...this.workbenchContributions().map((contribution) => legacyWorkbenchTemplate(contribution)),
-      ...native,
-    ];
-    const deduplicated = new Map<string, WorktableTemplateContribution>();
-    for (const template of templates) deduplicated.set(template.id, template);
-    return [...deduplicated.values()];
+  private syncPluginBlueprints(): void {
+    this.harnessWorkbenches.replacePluginBlueprints(this.plugins.workbenchBlueprints());
   }
 
-  private migrateLegacyWorkbenches(): void {
-    const legacy = this.workbenches.snapshot();
-    const existing = new Set(this.worktables.snapshot().instances.map((instance) => instance.id));
-    const ordered = [...legacy.tabs].sort((left, right) => Number(left.id === legacy.activeTabId) - Number(right.id === legacy.activeTabId));
-    for (const tab of ordered) {
-      if (existing.has(`legacy-workbench:${tab.id}`)) continue;
-      const contribution = this.workbenchContributions().find((candidate) => candidate.id === tab.workbenchId);
-      if (!contribution) continue;
-      this.worktables.syncLegacy(tab, contribution, SYSTEM_ACTOR);
+  private isTrustedPluginInstallation(plugin: { manifest: PluginManifest; sha256: string }): boolean {
+    return this.events.list(`project:${this.project.id}`).some((event) => {
+      if (event.kind !== 'plugin.installed' || !isRecord(event.payload) || event.payload.trusted !== true || event.payload.sha256 !== plugin.sha256) return false;
+      const manifest = event.payload.manifest;
+      return isRecord(manifest) && manifest.id === plugin.manifest.id && manifest.version === plugin.manifest.version;
+    });
+  }
+
+  private async disableUntrustedPlugins(): Promise<string[]> {
+    const disabled: string[] = [];
+    for (const plugin of this.plugins.list().filter((candidate) => candidate.enabled && !this.isTrustedPluginInstallation(candidate))) {
+      await this.plugins.deactivate(plugin.manifest.id);
+      disabled.push(plugin.manifest.id);
+      this.events.append({
+        streamId: `project:${this.project.id}`, kind: 'plugin.developer_mode_disabled', actor: SYSTEM_ACTOR,
+        payload: toJson({ id: plugin.manifest.id, version: plugin.manifest.version, sha256: plugin.sha256 }),
+      });
     }
+    return disabled;
+  }
+
+  private worktableTemplates(): WorktableTemplateContribution[] {
+    this.syncPluginBlueprints();
+    return this.harnessWorkbenches.templates();
   }
 
   private emitWorkbench(): void {
@@ -4649,6 +5183,32 @@ export class OpenLabRuntime {
 
   private emitWorktable(): void {
     this.emit({ type: 'worktable.changed', worktable: this.worktables.snapshot(), templates: this.worktableTemplates() });
+  }
+
+  private emitWorkbenchV1(): void {
+    this.emit({
+      type: 'workbench-v1.changed',
+      blueprints: this.harnessWorkbenches.blueprints(),
+      instances: this.harnessWorkbenches.list(),
+      proposals: this.harnessWorkbenches.proposals(),
+    });
+  }
+
+  private emitScientificKernel(): void {
+    this.emit({
+      type: 'scientific-kernel.changed',
+      evidenceAnchors: this.scientificKernel.anchors(),
+      runs: this.scientificKernel.runs(),
+      reviews: this.scientificKernel.reviews(),
+    });
+  }
+
+  private emitToolRuns(): void {
+    this.emit({ type: 'tool-runs.changed', adapters: this.toolchainAdapters.manifests(), runs: this.toolchainAdapters.runs() });
+  }
+
+  private emitPaperReaders(): void {
+    this.emit({ type: 'paper-readers.changed', readers: this.paperReaders.list() });
   }
 
   private requireWorktableBuiltin(instanceId: string, type: 'terminal' | 'scm', paneId?: string): WorktableInstance {
@@ -4705,6 +5265,10 @@ export class OpenLabRuntime {
 
   private emitGeneratedApps(): void {
     this.emit({ type: 'generated-app.changed', apps: this.generatedApps.list() });
+  }
+
+  private emitGeneratedBlueprints(): void {
+    this.emit({ type: 'generated-blueprints.changed', blueprints: this.generatedAppBlueprints.list() });
   }
 
   private replayBrowserState(): void {
@@ -4868,10 +5432,10 @@ export class OpenLabRuntime {
     return this.#workspace ? this.#workspace.rootPath(rootId, intent) : this.project.rootPath;
   }
 
-  private requirePluginCapability(request: PluginHostCall, capability: PluginPermission): void {
+  private requirePluginCapability(request: PluginHostCall, capability: PluginManifest['permissions'][number]): void {
     if (request.context.projectId !== this.project.id || !this.#sessions.some((session) => session.id === request.context.sessionId)) throw new Error('插件调用作用域已经失效');
     const plugin = this.plugins.list().find((candidate) => candidate.manifest.id === request.pluginId && candidate.enabled);
-    if (!plugin || ![2, 3].includes(plugin.manifest.apiVersion ?? 1)) throw new Error('插件未处于可调用的 v2/v3 状态');
+    if (!plugin || ![2, 3, 4].includes(plugin.manifest.apiVersion ?? 1)) throw new Error('插件未处于可调用的 v2/v3/v4 状态');
     if (!request.context.capabilities.includes(capability) || !plugin.manifest.permissions.includes(capability)) throw new Error(`插件未获得能力：${capability}`);
   }
 
@@ -4943,15 +5507,15 @@ export class OpenLabRuntime {
         this.requirePluginCapability(request, 'workspace:edit');
         throw new Error('插件不能自行批准 diff；请由用户在 Sci Workplace 编辑审批卡中应用该预览');
       case 'resources.open':
-        this.requirePluginCapability(request, 'resources:read');
+        this.requirePluginCapability(request, request.context.capabilities.includes('documents:read') ? 'documents:read' : 'resources:read');
         return this.resources.open(parameter<DocumentRevisionRef>('target'));
       case 'resources.read': {
-        this.requirePluginCapability(request, 'resources:read');
+        this.requirePluginCapability(request, request.context.capabilities.includes('documents:read') ? 'documents:read' : 'resources:read');
         const bytes = this.resources.read(String(request.params.handleId ?? ''), Number(request.params.start ?? 0), request.params.end === undefined ? undefined : Number(request.params.end));
         return { base64: bytes.toString('base64') };
       }
       case 'resources.release':
-        this.requirePluginCapability(request, 'resources:read');
+        this.requirePluginCapability(request, request.context.capabilities.includes('documents:read') ? 'documents:read' : 'resources:read');
         this.resources.release(String(request.params.handleId ?? ''));
         return true;
       case 'jobs.run': {
@@ -4994,6 +5558,34 @@ export class OpenLabRuntime {
         this.requirePluginCapability(request, 'jobs:run');
         const kind = typeof request.params.kind === 'string' ? request.params.kind : undefined;
         return this.toolchains.list().filter((toolchain) => !kind || toolchain.kind === kind);
+      }
+      case 'toolchains.adapters':
+        this.requirePluginCapability(request, 'toolchains:execute');
+        return this.toolchainAdapters.manifests();
+      case 'toolchains.run': {
+        this.requirePluginCapability(request, 'toolchains:execute');
+        const input = parameter<{ adapterId: string; operationId: string; values: Record<string, JsonValue>; confirmed: boolean; instanceId?: string }>('input');
+        if (input.instanceId) {
+          const instance = this.harnessWorkbenches.inspect(input.instanceId);
+          if (instance.primaryConversationId && instance.primaryConversationId !== request.context.sessionId) throw new Error('工具链运行只能绑定当前会话的 Workbench');
+        }
+        return this.toolchainAdapters.run({
+          ...input,
+          pluginId: request.pluginId,
+          ...(request.context.traceId ? { traceId: request.context.traceId } : {}),
+          ...(request.context.agentId ? { agentId: request.context.agentId } : {}),
+        }, actor);
+      }
+      case 'toolchains.getRun':
+      case 'toolchains.cancelRun':
+      case 'toolchains.runLog': {
+        this.requirePluginCapability(request, 'toolchains:execute');
+        const id = String(request.params.id ?? '');
+        const run = this.toolchainAdapters.get(id);
+        if (this.jobs.get(run.jobId).spec.pluginId !== request.pluginId) throw new Error('插件只能访问自己启动的 ToolRun');
+        if (request.method === 'toolchains.cancelRun') return this.toolchainAdapters.cancel(id, actor);
+        if (request.method === 'toolchains.runLog') return this.toolchainAdapters.log(id, Number(request.params.offset ?? 0));
+        return run;
       }
       case 'workflows.start': {
         this.requirePluginCapability(request, 'jobs:run');
@@ -5056,11 +5648,27 @@ export class OpenLabRuntime {
         this.emitAnnotations();
         return annotation;
       }
+      case 'evidence.list':
+        this.requirePluginCapability(request, 'evidence:read');
+        return this.scientificKernel.anchors(request.params.target as DocumentRevisionRef | undefined);
+      case 'evidence.create': {
+        this.requirePluginCapability(request, 'evidence:write');
+        const input = parameter<{
+          target: DocumentRevisionRef; selector: AnnotationSelector; page?: number; blockId?: string;
+          asset?: { kind: 'figure' | 'table' | 'formula'; id: string }; exact?: string; idempotencyKey?: string;
+        }>('input');
+        const absolute = new PathGuard(this.resolveWorkbenchRoot(input.target.ref.rootId, 'read')).resolveExisting(input.target.ref.path);
+        const actual = createHash('sha256').update(readFileSync(absolute)).digest('hex');
+        if (actual !== input.target.sha256) throw new Error('EvidenceAnchor 文档修订已变化');
+        const anchor = this.scientificKernel.createAnchor(input, actor, input.idempotencyKey);
+        this.emitScientificKernel();
+        return anchor;
+      }
       case 'artifacts.revisions':
-        this.requirePluginCapability(request, 'artifacts:write');
+        this.requirePluginCapability(request, request.context.capabilities.includes('artifacts:publish') ? 'artifacts:publish' : 'artifacts:write');
         return this.artifactRevisions.list(typeof request.params.artifactId === 'string' ? request.params.artifactId : undefined);
       case 'artifacts.createRevision': {
-        this.requirePluginCapability(request, 'artifacts:write');
+        this.requirePluginCapability(request, request.context.capabilities.includes('artifacts:publish') ? 'artifacts:publish' : 'artifacts:write');
         const input = parameter<CreateArtifactRevisionInput>('input');
         this.annotations.requireSubmittedSets(input.annotationSetIds ?? []);
         if (!request.context.agentId) throw new Error('Artifact revision 必须来自可追溯的 Agent 工具调用');
@@ -5089,10 +5697,10 @@ export class OpenLabRuntime {
         return revision;
       }
       case 'artifacts.archive':
-        this.requirePluginCapability(request, 'artifacts:write');
+        this.requirePluginCapability(request, request.context.capabilities.includes('artifacts:publish') ? 'artifacts:publish' : 'artifacts:write');
         throw new Error('版本存档必须由用户在 Sci Workplace 工作台中显式确认');
       case 'artifacts.registerSourceMap': {
-        this.requirePluginCapability(request, 'artifacts:write');
+        this.requirePluginCapability(request, request.context.capabilities.includes('artifacts:publish') ? 'artifacts:publish' : 'artifacts:write');
         const map = this.artifactRevisions.registerSourceMap({ ...parameter<Omit<SourceMapDescriptor, 'id' | 'projectId' | 'createdAt'>>('map'), pluginId: request.pluginId }, actor);
         this.emitSourceMaps();
         return map;
@@ -5132,6 +5740,65 @@ export class OpenLabRuntime {
         this.emitResearch();
         return relation;
       }
+      case 'workbenches.list':
+        this.requirePluginCapability(request, 'workbench:read');
+        return this.harnessWorkbenches.list();
+      case 'workbenches.inspect':
+        this.requirePluginCapability(request, 'workbench:read');
+        return this.harnessWorkbenches.inspect(String(request.params.instanceId ?? ''));
+      case 'workbenches.create': {
+        this.requirePluginCapability(request, 'workbench:write');
+        const input = parameter<{ blueprintId: string; title?: string; primaryConversationId?: string; inputs?: Record<string, JsonValue> }>('input');
+        this.syncPluginBlueprints();
+        const blueprint = this.harnessWorkbenches.blueprints().find((candidate) => candidate.id === input.blueprintId);
+        if (!blueprint || blueprint.pluginId !== request.pluginId) throw new Error('插件只能从自己贡献的 WorkbenchBlueprint 创建实例');
+        const conversationId = input.primaryConversationId ?? request.context.sessionId;
+        if (conversationId !== request.context.sessionId) throw new Error('插件只能绑定当前调用会话');
+        this.persistSessionForWorkbenchBinding(conversationId, actor);
+        const created = this.harnessWorkbenches.create({ ...input, primaryConversationId: conversationId }, actor);
+        this.emitWorktable();
+        this.emitWorkbenchV1();
+        return created;
+      }
+      case 'workbenches.open': {
+        this.requirePluginCapability(request, 'workbench:read');
+        const instanceId = String(request.params.instanceId ?? '');
+        this.harnessWorkbenches.inspect(instanceId);
+        this.worktables.activate(instanceId, actor);
+        this.emitWorktable();
+        this.emitWorkbenchV1();
+        return this.harnessWorkbenches.inspect(instanceId);
+      }
+      case 'workbenches.mount': {
+        this.requirePluginCapability(request, 'workbench:mount');
+        const intent = parameter<MountIntentV1>('intent');
+        this.resolvePluginMountableArtifact(request.pluginId, intent.artifact.artifactId, intent.artifact.revisionId);
+        const mounted = this.harnessWorkbenches.mount(intent, actor);
+        this.emitWorktable();
+        this.emitWorkbenchV1();
+        return mounted;
+      }
+      case 'workbenches.proposeLayout': {
+        this.requirePluginCapability(request, 'workbench:propose-layout');
+        const input = parameter<{
+          instanceId: string; baseRevision: number; title: string; reason: string;
+          layout: WorktableSplitNode; panes: WorktablePane[]; slots: WorkbenchSlotV1[];
+        }>('input');
+        const instance = this.harnessWorkbenches.inspect(input.instanceId);
+        const blueprint = this.harnessWorkbenches.blueprints().find((candidate) => candidate.id === instance.blueprintId);
+        if (blueprint?.pluginId !== request.pluginId) throw new Error('插件只能为自己的 WorkbenchBlueprint 提交布局提案');
+        const proposal = this.harnessWorkbenches.proposeLayout(input, actor);
+        this.emitWorkbenchV1();
+        return proposal;
+      }
+      case 'workbenches.reveal': {
+        this.requirePluginCapability(request, 'evidence:read');
+        const input = parameter<{ instanceId: string; anchorId: string; targetRole?: string }>('input');
+        const anchor = this.scientificKernel.anchor(input.anchorId);
+        const instance = this.harnessWorkbenches.inspect(input.instanceId);
+        const slot = input.targetRole ? instance.slots.find((candidate) => candidate.role === input.targetRole) : instance.slots.find((candidate) => candidate.role === 'source');
+        return this.revealWorktableEvidenceForPlugin(request.pluginId, input.instanceId, anchor.target, anchor.selector, slot ? { paneId: slot.paneId } : undefined, actor);
+      }
       case 'worktable.list':
         this.requirePluginCapability(request, 'worktable:read');
         return this.worktables.snapshot();
@@ -5156,9 +5823,11 @@ export class OpenLabRuntime {
           ? templates.find((candidate) => candidate.id === input.templateId)
           : templates.find((candidate) => candidate.pluginId === request.pluginId);
         if (!template || template.pluginId !== request.pluginId) throw new Error('插件只能从自己贡献的工作台模板创建实例');
+        const boundSessionId = input.boundSessionId ?? request.context.sessionId;
+        this.persistSessionForWorkbenchBinding(boundSessionId, actor);
         const instance = this.worktables.create(template, {
           ...(input.title ? { title: input.title } : {}),
-          boundSessionId: input.boundSessionId ?? request.context.sessionId,
+          boundSessionId,
           ...(input.inputs ? { inputs: input.inputs } : {}),
         }, actor);
         this.emitWorktable();
@@ -5220,6 +5889,7 @@ export class OpenLabRuntime {
         } else if (request.method === 'worktable.bindSession') {
           const sessionId = typeof request.params.sessionId === 'string' ? request.params.sessionId : undefined;
           if (sessionId && sessionId !== request.context.sessionId) throw new Error('插件只能绑定当前调用会话');
+          if (sessionId) this.persistSessionForWorkbenchBinding(sessionId, actor);
           this.worktables.patch(instanceId, { boundSessionId: sessionId ?? null }, actor);
         } else if (request.method === 'worktable.setStatus') {
           const status = String(request.params.status ?? '') as WorktableInstance['status'];
@@ -5290,7 +5960,9 @@ export class OpenLabRuntime {
         return output;
       }
       case 'generatedApps.list':
-        if (request.context.capabilities.includes('worktable:read')) this.requirePluginCapability(request, 'worktable:read');
+        if (request.context.capabilities.includes('workbench:read')) this.requirePluginCapability(request, 'workbench:read');
+        else if (request.context.capabilities.includes('worktable:read')) this.requirePluginCapability(request, 'worktable:read');
+        else if (request.context.capabilities.includes('generated-apps:build')) this.requirePluginCapability(request, 'generated-apps:build');
         else this.requirePluginCapability(request, 'generated-apps:publish');
         return this.generatedApps.list();
       case 'generatedApps.publish': {
@@ -5298,6 +5970,13 @@ export class OpenLabRuntime {
         return this.publishGeneratedAppFromPlugin(parameter<{
           title: string; source: WorkspacePathRef; entry: string; networkDomains?: string[]; hostCapabilities?: string[]; confirmed: boolean;
         }>('input'), request, actor);
+      }
+      case 'generatedApps.propose': {
+        this.requirePluginCapability(request, 'generated-apps:build');
+        const prompt = String(request.params.prompt ?? '');
+        const blueprint = this.generatedAppBlueprints.propose(prompt, actor);
+        this.emitGeneratedBlueprints();
+        return blueprint;
       }
       case 'workbench.open': {
         this.requirePluginCapability(request, 'ui');
@@ -5318,10 +5997,7 @@ export class OpenLabRuntime {
         if (!pdfView) throw new Error('插件工作台没有 PDF 视图');
         this.workbenches.setView(tab.id, pdfView.id, actor);
         const state = this.workbenches.reveal(tab.id, input.document, input.selector, actor);
-        const projectedTab = state.tabs.find((candidate) => candidate.id === tab.id);
-        if (projectedTab && contribution) this.worktables.syncLegacy(projectedTab, contribution, actor);
         this.emitWorkbench();
-        this.emitWorktable();
         return state;
       }
       case 'storage.get':
@@ -5463,6 +6139,12 @@ export class OpenLabRuntime {
     const qualified = /^deepseek-/u.test(preferred) ? `deepseek::${preferred}` : preferred;
     if (this.#models.some((model) => model.id === qualified)) return qualified;
     return this.#models.find((model) => model.isDefault)?.id ?? this.#models[0]?.id ?? 'openlab-demo';
+  }
+
+  private availableVisionModel(preferred: string): string | undefined {
+    const qualified = /^deepseek-/u.test(preferred) ? `deepseek::${preferred}` : preferred;
+    const selected = this.#models.find((model) => model.id === qualified && model.supportsVision);
+    return selected?.id ?? this.#models.find((model) => model.supportsVision)?.id;
   }
 
   private async refreshProviderModels(reinitializeTeam = true): Promise<void> {

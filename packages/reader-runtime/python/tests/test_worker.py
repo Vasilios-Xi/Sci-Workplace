@@ -13,9 +13,13 @@ from reader_worker.main import (
     caption_identity,
     consolidate_docling_text_blocks,
     deduplicate_physical_blocks,
+    expanded_crop_bbox,
     graphical_abstract_regions,
     inspect_pdf,
+    is_substantive_formula_region,
+    is_substantive_visual_region,
     mark_ancillary_metadata,
+    mark_caption_continuations,
     mark_formula_regions,
     mark_front_matter,
     mark_inline_section_headings,
@@ -26,6 +30,7 @@ from reader_worker.main import (
     mark_visual_region_text,
     matching_visual_region,
     parse_pdf,
+    remove_nonsemantic_text_layer_artifacts,
     remove_orphan_combining_glyphs,
     render_page,
     select_document_title,
@@ -62,6 +67,64 @@ def revision_for(path: Path) -> str:
 
 
 class GraphicalAbstractTests(unittest.TestCase):
+    def test_rejects_micro_visual_regions_but_keeps_real_figures_and_tables(self) -> None:
+        self.assertFalse(is_substantive_visual_region([100, 100, 126, 112], 595, 842))
+        self.assertFalse(is_substantive_visual_region([100, 100, 240, 120], 595, 842))
+        self.assertFalse(is_substantive_visual_region([100, 100, 180, 260], 595, 842))
+        self.assertTrue(is_substantive_visual_region([40, 80, 555, 420], 595, 842))
+
+    def test_rejects_formula_glyph_fragments_and_expands_real_equations(self) -> None:
+        self.assertFalse(is_substantive_formula_region([100, 100, 105, 110], "x"))
+        self.assertFalse(is_substantive_formula_region([100, 100, 115, 108], "x=1"))
+        self.assertFalse(is_substantive_formula_region([100, 100, 180, 118], "[公式转写失败：原始区域已保留]"))
+        self.assertFalse(is_substantive_formula_region([500, 100, 520, 112], "(1)"))
+        self.assertTrue(is_substantive_formula_region([100, 100, 150, 115], "x=1"))
+        self.assertTrue(is_substantive_formula_region([100, 100, 180, 118], r"\ce{Li_6PS_5Cl}"))
+        self.assertTrue(is_substantive_formula_region([108, 576, 542, 592], "(1)"))
+
+        crop = expanded_crop_bbox(
+            [2, 3, 32, 13], 595, 842,
+            minimum_width=96, minimum_height=28, padding_x=7, padding_y=5,
+        )
+        self.assertGreaterEqual(crop[2] - crop[0], 96)
+        self.assertGreaterEqual(crop[3] - crop[1], 28)
+        self.assertGreaterEqual(crop[0], 0)
+        self.assertGreaterEqual(crop[1], 0)
+
+    def test_removes_only_the_known_invisible_publisher_glyph_probe(self) -> None:
+        blocks = [
+            {"originalText": "1234567890():,;", "type": "paragraph"},
+            {"originalText": "1234567890 ( ) : , ;", "type": "figure_text"},
+            {"originalText": "1234567890", "type": "paragraph"},
+            {"originalText": "0 mAh cm-2", "type": "figure_text"},
+            {"originalText": "+1 (234) 567-8900", "type": "front_matter"},
+        ]
+
+        removed = remove_nonsemantic_text_layer_artifacts(blocks)
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            [block["originalText"] for block in blocks],
+            ["1234567890", "0 mAh cm-2", "+1 (234) 567-8900"],
+        )
+
+    def test_caption_continuation_never_consumes_body_or_page_chrome(self) -> None:
+        blocks = [
+            {"id": "S1", "page": 3, "type": "paragraph", "order": 1, "originalText": "Body before the figure.", "bbox": [40, 560, 295, 657], "_doclingLabel": "text", "_doclingItemId": "D25", "_doclingItemOrder": 25},
+            {"id": "C1", "page": 3, "type": "caption", "order": 2, "originalText": "Fig. 1 | Operando result. a First column of the legend", "bbox": [40, 477, 295, 544], "_doclingLabel": "caption", "_doclingItemId": "D27", "_doclingItemOrder": 27},
+            {"id": "S2", "page": 3, "type": "heading", "order": 3, "originalText": "Mechanistic interpretation", "bbox": [40, 670, 273, 679], "_doclingLabel": "section_header", "_doclingItemId": "D28", "_doclingItemOrder": 28},
+            {"id": "S3", "page": 3, "type": "paragraph", "order": 4, "originalText": "The scientific discussion continues here.", "bbox": [40, 681, 295, 743], "_doclingLabel": "text", "_doclingItemId": "D29", "_doclingItemOrder": 29},
+            {"id": "S4", "page": 3, "type": "running_matter", "order": 5, "originalText": "Nature Communications | (2025)16:4283 3", "bbox": [40, 762, 561, 772], "_doclingLabel": "", "_doclingItemId": None, "_doclingItemOrder": None},
+            {"id": "C2", "page": 3, "type": "caption", "order": 6, "originalText": "splitting. b Second column of the same legend.", "bbox": [306, 477, 561, 544], "_doclingLabel": "caption", "_doclingItemId": "D30", "_doclingItemOrder": 30},
+            {"id": "S5", "page": 3, "type": "figure_text", "order": 7, "originalText": "0.5 mA cm-2", "bbox": [170, 90, 250, 104], "_doclingLabel": "", "_doclingItemId": None, "_doclingItemOrder": None},
+        ]
+
+        mark_caption_continuations(blocks, [])
+
+        self.assertEqual([block["type"] for block in blocks], [
+            "paragraph", "caption", "heading", "paragraph", "running_matter", "caption", "figure_text",
+        ])
+
     def test_numbered_caption_requires_caption_syntax_not_a_prose_mention(self) -> None:
         self.assertIsNotNone(CAPTION_RE.match("Figure 4. a) SEM image of the electrode"))
         self.assertIsNotNone(CAPTION_RE.match("Table 1 : Summary of fitted values"))
@@ -767,6 +830,12 @@ class ReferencePdfTests(unittest.TestCase):
             result = parse_pdf(str(REFERENCE_PDF), directory, revision_for(REFERENCE_PDF))
             self.assertEqual(result["parser"], "docling+pdfplumber")
             self.assertEqual(result["paper"]["pageCount"], 30)
+            self.assertEqual(result["parserVersion"], "0.2.23")
+            self.assertEqual(result["paper"]["profilePage"], 1)
+            self.assertTrue(Path(result["paper"]["profileImagePath"]).is_file())
+            with Image.open(result["paper"]["profileImagePath"]) as profile_image:
+                self.assertGreater(profile_image.width, 1_000)
+                self.assertGreater(profile_image.height, 1_000)
             self.assertEqual(len(result["pages"]), 30)
             self.assertGreater(len(result["blocks"]), 40)
             self.assertGreaterEqual(len(result["figures"]), 5)
@@ -940,6 +1009,8 @@ class RepositoryCoverRegressionPdfTests(unittest.TestCase):
                 result["paper"]["title"],
                 "Dendrite Initiation and Propagation in Lithium Metal Solid-State Batteries",
             )
+            self.assertGreater(result["paper"]["profilePage"], 1)
+            self.assertTrue(Path(result["paper"]["profileImagePath"]).is_file())
             self.assertTrue(all(block["type"] == "front_matter" for block in blocks if block["page"] == 1))
 
             author_list = next(block for block in blocks if block["originalText"].startswith("Ziyang Ning"))

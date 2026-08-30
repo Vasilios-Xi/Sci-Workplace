@@ -12,6 +12,7 @@ Thumbs.db
 .openlab/
 .research/
 .tmp/
+/tmp/
 .codex-appserver-schema-tmp/
 apps/renderer/playwright-report/
 apps/renderer/test-results/

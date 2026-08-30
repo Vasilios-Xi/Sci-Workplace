@@ -54,6 +54,11 @@ function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
+function isRecoverableTransportStartError(value: unknown): boolean {
+  const message = errorMessage(value);
+  return /request timed out: thread\/start|not running|failed to start|stopped|exited|EPIPE|write after end/iu.test(message);
+}
+
 function nestedString(value: unknown, ...paths: string[][]): string | undefined {
   for (const path of paths) {
     let current = value;
@@ -136,6 +141,11 @@ class JsonRpcProcess {
       child.once('exit', () => { clearTimeout(timer); resolve(); });
     });
     if (!child.killed) child.kill('SIGKILL');
+  }
+
+  async restart(): Promise<void> {
+    await this.dispose();
+    await this.start();
   }
 
   private async startProcess(): Promise<void> {
@@ -403,6 +413,7 @@ export class CodexAppServerProvider implements ModelProvider {
   readonly id = 'chatgpt-oauth';
   readonly #rpc: JsonRpcProcess;
   readonly #workingDirectory: string;
+  #activeStreams = 0;
 
   constructor(options: { command?: string; workingDirectory: string }) {
     this.#rpc = new JsonRpcProcess(options.command ?? 'codex');
@@ -437,6 +448,7 @@ export class CodexAppServerProvider implements ModelProvider {
   }
 
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    this.#activeStreams += 1;
     const nativeModel = request.model.startsWith('chatgpt-oauth::') ? request.model.slice('chatgpt-oauth::'.length) : request.model;
     const queue = new AsyncQueue<ModelEvent>();
     let threadId = '';
@@ -533,7 +545,7 @@ export class CodexAppServerProvider implements ModelProvider {
     };
     signal.addEventListener('abort', onAbort, { once: true });
     try {
-      const thread = await this.#rpc.request<unknown>('thread/start', {
+      const threadParameters = {
         cwd: this.#workingDirectory,
         model: nativeModel,
         approvalPolicy: 'never',
@@ -550,7 +562,18 @@ export class CodexAppServerProvider implements ModelProvider {
           'When the transcript already contains a tool result, continue from that result and answer the user or call another registered dynamic tool.',
         ].join(' '),
         experimentalRawEvents: false,
-      }, 30_000);
+      };
+      let thread: unknown;
+      try {
+        thread = await this.#rpc.request<unknown>('thread/start', threadParameters, 60_000);
+      } catch (error) {
+        // A timed-out app-server process can stay alive while no longer accepting
+        // new threads. Recycle it only when this is the sole active stream so an
+        // unrelated concurrent generation is never interrupted.
+        if (signal.aborted || this.#activeStreams !== 1 || !isRecoverableTransportStartError(error)) throw error;
+        await this.#rpc.restart();
+        thread = await this.#rpc.request<unknown>('thread/start', threadParameters, 60_000);
+      }
       threadId = nestedString(thread, ['thread', 'id'], ['threadId'], ['id']) ?? '';
       if (!threadId) throw new Error('Codex App Server did not return a thread id');
       const effort = request.thinking === 'disabled' ? 'none' : request.reasoningEffort;
@@ -565,7 +588,7 @@ export class CodexAppServerProvider implements ModelProvider {
         effort,
         ...(request.responseSchema ? { outputSchema: request.responseSchema } : {}),
         input: turnInput,
-      }, 30_000);
+      }, 60_000);
       turnId = nestedString(turn, ['turn', 'id'], ['turnId'], ['id']) ?? '';
       if (!turnId) throw new Error('Codex App Server did not return a turn id');
       for await (const event of queue) yield event;
@@ -580,6 +603,7 @@ export class CodexAppServerProvider implements ModelProvider {
       for (const path of temporaryImagePaths) {
         try { unlinkSync(path); } catch { /* already removed or unavailable */ }
       }
+      this.#activeStreams -= 1;
     }
   }
 
