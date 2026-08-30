@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  CITATION_SUPPORTED_INPUT_FORMATS_V1,
   definePlugin,
   type BibliographicRecordV1,
   type BibliographyQueryV1,
@@ -29,6 +30,14 @@ const WORKFLOW_ID = 'sci.citation-workbench:repair';
 const PREVIEW_TTL_MS = 15 * 60_000;
 const DEFAULT_TOKEN_BUDGET = 60_000;
 const MAX_RESOLVE_BATCH = 500;
+const MAX_REFERENCE_OVERRIDES = 2_000;
+const MAX_OVERRIDE_TEXT = 16_000;
+const MAX_OVERRIDE_MEMBERS = 100;
+
+interface ReferenceOverride {
+  unitId: string;
+  referenceText: string;
+}
 
 interface CitationConfig {
   instanceId: string;
@@ -41,6 +50,7 @@ interface CitationConfig {
   collectionChild: string;
   collectionKey?: string;
   operationKey: string;
+  referenceOverrides: ReferenceOverride[];
 }
 
 interface PreviewAuthorization {
@@ -134,12 +144,112 @@ function queryId(unitId: string, member: number): string {
   return `${unitId}:${member}`;
 }
 
-function queriesFor(inspection: CitationDocumentInspectionV1): { queries: BibliographyQueryV1[]; byUnit: Map<string, string[]> } {
+function cleanDoi(value: string): string {
+  return value.trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//iu, '').replace(/^doi\s*:\s*/iu, '').replace(/[.,;:]+$/u, '').toLocaleLowerCase();
+}
+
+function structuredReference(value: string): { title: string; year?: number; firstAuthor?: string } | undefined {
+  const raw = value.replace(/^\s*(?:\[\s*\d+\s*\]|\(\s*\d+\s*\)|（\s*\d+\s*）|\d+[.)](?!\d))\s*/u, '').replace(/\s+/gu, ' ').trim();
+  const firstAuthor = raw.match(/^([\p{L}'’-]{2,})/u)?.[1];
+  const apa = raw.match(/^.{2,220}?\s+\(((?:19|20)\d{2})[a-z]?\)\.\s+(.{18,500}?)\.\s+.{2,}$/u);
+  if (apa?.[2]) return { title: apa[2].trim(), year: Number(apa[1]), ...(firstAuthor ? { firstAuthor } : {}) };
+  const gbt = raw.match(/^.{2,220}?\.\s+(.{18,500}?)\s*\[[Jj]\]\.\s*.+?\b((?:19|20)\d{2})\b/u);
+  if (gbt?.[1]) return { title: gbt[1].trim(), year: Number(gbt[2]), ...(firstAuthor ? { firstAuthor } : {}) };
+  const segments = raw.split(/\.\s+/u).map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length < 3 || !segments[1] || segments[1].length < 18 || !/\b(?:19|20)\d{2}\b/u.test(segments.slice(2).join('. '))) return undefined;
+  const authorSegment = segments[0] ?? '';
+  if (!/[;,]|\b[\p{Lu}]\.?$/u.test(authorSegment) || authorSegment.length > 220) return undefined;
+  const year = Number(segments.slice(2).join('. ').match(/\b((?:19|20)\d{2})\b/u)?.[1] ?? 0) || undefined;
+  return { title: segments[1], ...(year ? { year } : {}), ...(firstAuthor ? { firstAuthor } : {}) };
+}
+
+function queryFromReferenceLine(unitId: string, member: number, line: string): BibliographyQueryV1 {
+  const doiMatches = [...line.matchAll(/(?:https?:\/\/(?:dx\.)?doi\.org\/|doi\s*:\s*)?(10\.\d{4,9}\/[A-Z0-9._;()\/:+-]+)/giu)].map((match) => cleanDoi(match[1] ?? '')).filter(Boolean);
+  const pmids = [...line.matchAll(/\bPMID\s*:\s*(\d{5,9})\b/giu)].map((match) => match[1]!).filter(Boolean);
+  const arxivIds = [...line.matchAll(/(?:\barXiv\s*:\s*|https?:\/\/(?:www\.)?arxiv\.org\/abs\/)(\d{4}\.\d{4,5}(?:v\d+)?)\b/giu)].map((match) => (match[1] ?? '').replace(/v\d+$/iu, '')).filter(Boolean);
+  const identifiers = [...new Set([...doiMatches.map((value) => `doi:${value}`), ...pmids.map((value) => `pmid:${value}`), ...arxivIds.map((value) => `arxiv:${value}`)])];
+  const id = queryId(unitId, member);
+  if (identifiers.length > 1) throw new Error('每行只能对应一篇论文，不能同时包含多个不同标识');
+  if (doiMatches[0]) return { id, raw: line, doi: doiMatches[0] };
+  if (pmids[0]) return { id, raw: line, pmid: pmids[0] };
+  if (arxivIds[0]) return { id, raw: line, arxivId: arxivIds[0] };
+  const labeled = line.trim().match(/^(?:Title|题名)\s*[:：]\s*(.+)$/iu);
+  if (labeled?.[1] && labeled[1].trim().length >= 18) return { id, raw: line, title: labeled[1].replace(/[.;,]+$/u, '').trim() };
+  const structured = structuredReference(line);
+  if (structured) return { id, raw: line, title: structured.title, ...(structured.year ? { year: structured.year } : {}), ...(structured.firstAuthor ? { firstAuthor: structured.firstAuthor } : {}) };
+  throw new Error('不属于可识别格式；请使用 DOI、PMID、arXiv、Title:/题名：或单条 APA/Vancouver/GB/T 参考文献');
+}
+
+function normalizeReferenceOverrides(value: unknown): ReferenceOverride[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_REFERENCE_OVERRIDES) throw new Error(`补充信息必须是最多 ${MAX_REFERENCE_OVERRIDES} 条的数组`);
+  const output: ReferenceOverride[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const item = asRecord(entry);
+    const unitId = String(item?.unitId ?? '').trim();
+    const referenceText = String(item?.referenceText ?? '').trim();
+    if (!unitId || !referenceText) continue;
+    if (unitId.length > 200 || referenceText.length > MAX_OVERRIDE_TEXT) throw new Error('补充信息的引用单元 ID 或文本过长');
+    if (seen.has(unitId)) throw new Error(`引用单元 ${unitId} 提交了重复补充信息`);
+    seen.add(unitId);
+    output.push({ unitId, referenceText });
+  }
+  return output;
+}
+
+function overrideQueries(inspection: CitationDocumentInspectionV1, overrides: ReferenceOverride[]): Map<string, BibliographyQueryV1[]> {
+  const units = new Map(inspection.units.map((unit) => [unit.id, unit]));
+  const output = new Map<string, BibliographyQueryV1[]>();
+  for (const override of overrides) {
+    const unit = units.get(override.unitId);
+    if (!unit) throw new Error(`补充信息对应的引用单元不存在或源文件已变化：${override.unitId}`);
+    const lines = override.referenceText.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
+    if (lines.length === 0 || lines.length > MAX_OVERRIDE_MEMBERS) throw new Error(`引用单元 ${override.unitId} 必须提供 1–${MAX_OVERRIDE_MEMBERS} 行论文信息`);
+    const expectedMembers = unit.numericLabels?.length;
+    if (expectedMembers && lines.length !== expectedMembers) throw new Error(`引用簇“${unit.raw}”包含 ${expectedMembers} 篇论文，必须逐行提供同样数量的论文信息`);
+    try {
+      output.set(unit.id, lines.map((line, index) => queryFromReferenceLine(unit.id, index, line)));
+    } catch (error) {
+      throw new Error(`引用单元“${unit.raw}”的补充信息无效：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return output;
+}
+
+function sourceLocator(unit: CitationDocumentUnitV1, format: CitationDocumentInspectionV1['format']): Record<string, JsonValue> {
+  const partName = unit.part === 'word/document.xml' || unit.part === 'body' ? '正文' : unit.part === 'word/footnotes.xml' ? '脚注' : unit.part === 'word/endnotes.xml' ? '尾注' : unit.part;
+  const paragraphNumber = unit.paragraphIndex + 1;
+  const index = unit.context.indexOf(unit.raw);
+  const before = index >= 0 ? unit.context.slice(0, index) : '';
+  const target = index >= 0 ? unit.context.slice(index, index + unit.raw.length) : unit.raw;
+  const after = index >= 0 ? unit.context.slice(index + unit.raw.length) : unit.context;
+  return {
+    part: unit.part,
+    partName,
+    paragraphIndex: unit.paragraphIndex,
+    paragraphNumber,
+    start: unit.start,
+    end: unit.end,
+    label: `${partName}第 ${paragraphNumber} 段 · ${format === 'docx' ? '段内' : '文件'}字符 ${unit.start}–${unit.end}`,
+    before,
+    target,
+    after,
+  };
+}
+
+function queriesFor(inspection: CitationDocumentInspectionV1, overrides: ReferenceOverride[] = []): { queries: BibliographyQueryV1[]; byUnit: Map<string, string[]> } {
   const queries: BibliographyQueryV1[] = [];
   const byUnit = new Map<string, string[]>();
+  const overridesByUnit = overrideQueries(inspection, overrides);
   for (const unit of inspection.units) {
-    if (unit.kind === 'placeholder') continue;
-    const identifiers = unit.identifiers ?? [];
+    const override = overridesByUnit.get(unit.id);
+    if (override) {
+      queries.push(...override);
+      byUnit.set(unit.id, override.map((query) => query.id));
+      continue;
+    }
+    const identifiers = unit.recognitionStatus === 'needs_input' ? [] : unit.identifiers ?? [];
     const ids: string[] = [];
     for (const [index, identifier] of identifiers.entries()) {
       if (!identifier.managerKey && !identifier.doi && !identifier.pmid && !identifier.arxivId && !identifier.title) continue;
@@ -175,20 +285,24 @@ async function resolveAll(host: PluginHostV4, queries: BibliographyQueryV1[]): P
 async function identitiesFor(
   host: PluginHostV4,
   inspection: CitationDocumentInspectionV1,
+  overrides: ReferenceOverride[] = [],
 ): Promise<{ identities: Map<string, UnitIdentity>; resolutions: BibliographyResolutionV1[] }> {
-  const { queries, byUnit } = queriesFor(inspection);
+  const { queries, byUnit } = queriesFor(inspection, overrides);
   const resolutions = await resolveAll(host, queries);
   const resolutionById = new Map(resolutions.map((resolution) => [resolution.queryId, resolution]));
   const verificationCache = new Map<string, BibliographyVerificationV1>();
   const identities = new Map<string, UnitIdentity>();
   for (const unit of inspection.units) {
-    if (unit.kind === 'placeholder') {
-      identities.set(unit.id, { status: 'unrecognized', reason: '占位符不代表可唯一识别的论文，按规则原样保留', records: [], verifications: [] });
-      continue;
-    }
     const ids = byUnit.get(unit.id) ?? [];
     if (ids.length === 0) {
-      identities.set(unit.id, { status: 'unrecognized', reason: '没有唯一 DOI、PMID、arXiv ID、管理器标识或完整题名', records: [], verifications: [] });
+      const reason = unit.kind === 'placeholder'
+        ? '占位符不属于可识别论文信息；请定位原文并补充白名单格式后重新预览'
+        : unit.recognizedFormat === 'endnote-field' || unit.recognizedFormat === 'zotero-field'
+          ? `已识别真实 ${unit.recognizedFormat === 'endnote-field' ? 'EndNote' : 'Zotero'} 字段，但字段内没有可唯一解析的论文标识；请补充规范论文信息`
+          : unit.kind === 'numeric-cluster'
+            ? '数字引用未能完整映射到符合白名单的参考文献条目；请按引用簇顺序逐行补充论文信息'
+            : '当前内容不属于已声明的固定格式；请提供 DOI、PMID、arXiv、带标签完整题名或结构化参考文献行';
+      identities.set(unit.id, { status: 'unrecognized', reason, records: [], verifications: [] });
       continue;
     }
     const members = ids.map((id) => resolutionById.get(id));
@@ -240,7 +354,7 @@ function tokenBudget(instance: WorkbenchInstanceV1): number {
   return [20_000, 60_000, 120_000, 240_000].includes(value) ? value : DEFAULT_TOKEN_BUDGET;
 }
 
-async function configFor(host: PluginHostV4, instance: WorkbenchInstanceV1, inspection: CitationDocumentInspectionV1): Promise<CitationConfig> {
+async function configFor(host: PluginHostV4, instance: WorkbenchInstanceV1, inspection: CitationDocumentInspectionV1, referenceOverrides: ReferenceOverride[]): Promise<CitationConfig> {
   const source = sourceFromInstance(instance);
   const requestedStyle = typeof instance.inputs.style === 'string' ? instance.inputs.style : 'auto';
   const family = styleFamily(requestedStyle, inspection.detectedStyleFamily);
@@ -252,16 +366,17 @@ async function configFor(host: PluginHostV4, instance: WorkbenchInstanceV1, insp
   const collectionRoot = 'Sci Workplace';
   const collectionChild = `${sourceStem(source.ref.path)} · References`;
   const maximumTotalTokens = tokenBudget(instance);
-  const operationKey = `citation-${hash(JSON.stringify({ source, styleId, family, model, maximumTotalTokens, collectionKey, collectionRoot, collectionChild })).slice(0, 40)}`;
-  return { instanceId: instance.id, source, styleId, styleFamily: family, model, maximumTotalTokens, collectionRoot, collectionChild, ...(collectionKey ? { collectionKey } : {}), operationKey };
+  const operationKey = `citation-${hash(JSON.stringify({ source, styleId, family, model, maximumTotalTokens, collectionKey, collectionRoot, collectionChild, referenceOverrides })).slice(0, 40)}`;
+  return { instanceId: instance.id, source, styleId, styleFamily: family, model, maximumTotalTokens, collectionRoot, collectionChild, ...(collectionKey ? { collectionKey } : {}), operationKey, referenceOverrides };
 }
 
-async function prepare(instanceId: string, context: PluginExecutionContextV4): Promise<ToolExecutionResult> {
+async function prepare(instanceId: string, referenceOverrides: ReferenceOverride[], context: PluginExecutionContextV4): Promise<ToolExecutionResult> {
   const instance = await context.host.workbenches.inspect(instanceId);
   const source = sourceFromInstance(instance);
   const inspection = await context.host.bibliography.scanDocument(source);
-  const config = await configFor(context.host, instance, inspection);
-  const { identities } = await identitiesFor(context.host, inspection);
+  overrideQueries(inspection, referenceOverrides);
+  const config = await configFor(context.host, instance, inspection, referenceOverrides);
+  const { identities } = await identitiesFor(context.host, inspection, referenceOverrides);
   const eligibleRecords = [...new Map([...identities.values()].flatMap((identity) => identity.status === 'applied' ? identity.records : []).map((record) => [record.canonicalId, record])).values()];
   const target = { rootName: config.collectionRoot, childName: config.collectionChild, ...(config.collectionKey ? { collectionKey: config.collectionKey } : {}) };
   const syncPlan = await context.host.zotero.planSync({
@@ -278,6 +393,25 @@ async function prepare(instanceId: string, context: PluginExecutionContextV4): P
   const expiresAt = new Date(Date.now() + PREVIEW_TTL_MS).toISOString();
   const token = `cpreview_${randomUUID()}`;
   const skipped = inspection.units.length - [...identities.values()].filter((identity) => identity.status === 'applied').length;
+  const overrideByUnit = new Map(referenceOverrides.map((override) => [override.unitId, override.referenceText]));
+  const recognitionItems = inspection.units.map((unit) => {
+    const identity = identities.get(unit.id) ?? { status: 'unrecognized', reason: '没有决策记录' };
+    return {
+      unitId: unit.id,
+      kind: unit.kind,
+      recognitionStatus: unit.recognitionStatus ?? ((unit.identifiers?.length ?? 0) > 0 ? 'recognized' : 'needs_input'),
+      recognizedFormat: unit.recognizedFormat ?? 'unsupported',
+      identityStatus: identity.status,
+      reason: identity.reason,
+      originalText: unit.raw,
+      context: unit.context,
+      referenceOnly: unit.referenceOnly,
+      expectedMembers: unit.numericLabels?.length ?? Math.max(1, unit.identifiers?.length ?? 1),
+      locator: sourceLocator(unit, inspection.format),
+      ...(overrideByUnit.has(unit.id) ? { suppliedReference: overrideByUnit.get(unit.id) } : {}),
+    };
+  });
+  const unrecognizedItems = recognitionItems.filter((item) => item.identityStatus !== 'applied');
   const preview: Record<string, JsonValue> = {
     schemaVersion: 1,
     ready: true,
@@ -307,12 +441,16 @@ async function prepare(instanceId: string, context: PluginExecutionContextV4): P
       maximumAttachments: eligibleRecords.length,
     }),
     warnings: json(inspection.warnings),
+    supportedInputFormats: json(inspection.supportedInputFormats ?? CITATION_SUPPORTED_INPUT_FORMATS_V1),
+    recognitionItems: json(recognitionItems),
+    unrecognizedItems: json(unrecognizedItems),
+    referenceOverrideCount: referenceOverrides.length,
   };
   previewAuthorizations.set(token, { token, instanceId, instanceRevision: instance.revision, expiresAt, config, preview });
   return {
     callId: context.traceId,
     ok: true,
-    content: `已扫描 ${inspection.units.length} 个引用单元；${eligibleRecords.length} 篇论文达到身份/元数据预检阈值，最多需要 ${semanticCalls} 次 AI 支持性判断。`,
+    content: `仅按已声明的固定格式完成扫描：${inspection.units.length} 个引用单元中 ${inspection.units.length - skipped} 个通过身份/元数据预检，${skipped} 个已列入待补充清单。`,
     artifactIds: [],
     metadata: preview,
   };
@@ -330,6 +468,7 @@ function workflowInputSchemaConfig(authorization: PreviewAuthorization, retryUni
     maximumTotalTokens: config.maximumTotalTokens,
     collectionRoot: config.collectionRoot,
     collectionChild: config.collectionChild,
+    referenceOverrides: json(config.referenceOverrides),
     ...(config.collectionKey ? { collectionKey: config.collectionKey } : {}),
     ...(retryUnitIds && retryUnitIds.length > 0 ? { retryUnitIds } : {}),
   };
@@ -448,11 +587,11 @@ function auditMarkdown(audit: Record<string, unknown>): string {
     '',
     '## 已应用',
     '',
-    ...(applied.length > 0 ? applied.map((decision) => `- \`${String(decision.unitId)}\` ${String(decision.originalText)} → ${String(decision.displayText)}`) : ['- 无']),
+    ...(applied.length > 0 ? applied.map((decision) => `- \`${String(decision.unitId)}\`（${String(asRecord(decision.locator)?.label ?? '位置未记录')}）${String(decision.originalText)} → ${String(decision.displayText)}`) : ['- 无']),
     '',
     '## 待核对',
     '',
-    ...(skipped.length > 0 ? skipped.map((decision) => `- \`${String(decision.unitId)}\` **${String(decision.status)}**：${String(decision.reason)}；原文保持为“${String(decision.originalText)}”`) : ['- 无']),
+    ...(skipped.length > 0 ? skipped.map((decision) => `- \`${String(decision.unitId)}\`（${String(asRecord(decision.locator)?.label ?? '位置未记录')}）**${String(decision.status)}**：${String(decision.reason)}；原文保持为“${String(decision.originalText)}”。可按白名单格式补充论文信息后重新预览。`) : ['- 无']),
     '',
     '## Zotero 同步',
     '',
@@ -483,6 +622,7 @@ async function runWorkflow(input: Record<string, JsonValue>, context: PluginWork
     collectionRoot: String(input.collectionRoot),
     collectionChild: String(input.collectionChild),
     ...(typeof input.collectionKey === 'string' ? { collectionKey: input.collectionKey } : {}),
+    referenceOverrides: normalizeReferenceOverrides(input.referenceOverrides),
   };
   const checkpointKey = `checkpoint/${hash(config.operationKey).slice(0, 32)}`;
   const report = async (progress: number, stage: string, metadata: Record<string, JsonValue> = {}) => {
@@ -493,7 +633,8 @@ async function runWorkflow(input: Record<string, JsonValue>, context: PluginWork
   await report(0.03, context.resume ? '恢复：重新验证源文件与幂等状态' : '只读扫描源文档', { sourceSha256: config.source.sha256 });
   const inspection = await context.host.bibliography.scanDocument(config.source);
   await report(0.12, '确定性身份解析与权威元数据复核', { detectedUnits: inspection.units.length });
-  const { identities, resolutions } = await identitiesFor(context.host, inspection);
+  overrideQueries(inspection, config.referenceOverrides);
+  const { identities, resolutions } = await identitiesFor(context.host, inspection, config.referenceOverrides);
   const preliminary: PreliminaryDecision[] = [];
   let consumedTokens = 0;
   const semanticCandidates = inspection.units.filter((unit) => !unit.referenceOnly && unit.kind !== 'title' && identities.get(unit.id)?.status === 'applied');
@@ -599,6 +740,19 @@ async function runWorkflow(input: Record<string, JsonValue>, context: PluginWork
       ...(decision.evidence ? { supportEvidence: decision.evidence } : {}),
     };
   });
+  const overrideByUnit = new Map(config.referenceOverrides.map((override) => [override.unitId, override.referenceText]));
+  const auditDecisions = edits.map((edit, index) => {
+    const unit = preliminary[index]!.unit;
+    return {
+      ...edit,
+      kind: unit.kind,
+      referenceOnly: unit.referenceOnly,
+      recognitionStatus: unit.recognitionStatus ?? ((unit.identifiers?.length ?? 0) > 0 ? 'recognized' : 'needs_input'),
+      recognizedFormat: unit.recognizedFormat ?? 'unsupported',
+      locator: sourceLocator(unit, inspection.format),
+      ...(overrideByUnit.has(unit.id) ? { suppliedReference: overrideByUnit.get(unit.id) } : {}),
+    };
+  });
 
   await report(0.80, '生成修订稿与动态引用字段', { appliedUnits: edits.filter((edit) => edit.status === 'applied').length, skippedUnits: edits.filter((edit) => edit.status !== 'applied').length });
   const materialized = await context.host.zotero.materializeCitationDocument({
@@ -613,7 +767,7 @@ async function runWorkflow(input: Record<string, JsonValue>, context: PluginWork
   });
   const audit: Record<string, unknown> = {
     schemaVersion: 1,
-    plugin: { id: 'sci.citation-workbench', version: '1.0.0' },
+    plugin: { id: 'sci.citation-workbench', version: '1.1.0' },
     operationKey: config.operationKey,
     readiness: materialized.readiness,
     source: config.source,
@@ -625,7 +779,9 @@ async function runWorkflow(input: Record<string, JsonValue>, context: PluginWork
     maximumTotalTokens: config.maximumTotalTokens,
     consumedTokens,
     detectedUnits: inspection.units.length,
-    decisions: edits,
+    decisions: auditDecisions,
+    supportedInputFormats: inspection.supportedInputFormats ?? CITATION_SUPPORTED_INPUT_FORMATS_V1,
+    referenceOverrides: config.referenceOverrides,
     resolutions,
     zoteroStatus,
     zotero: zoteroReceipt,
@@ -653,7 +809,7 @@ async function runWorkflow(input: Record<string, JsonValue>, context: PluginWork
       { role: 'output', content: reportMarkdown, name: 'citation-audit.md', mediaType: 'text/markdown' },
       { role: 'data', content: bibliography, name: 'references.bib', mediaType: 'application/x-bibtex' },
       { role: 'log', content: JSON.stringify(zoteroReceipt, null, 2), name: 'zotero-sync-receipt.json', mediaType: 'application/json' },
-      { role: 'mapping', content: JSON.stringify({ source: config.source, output: materialized.output, decisions: edits.map((edit) => ({ unitId: edit.unitId, status: edit.status, originalText: edit.originalText, displayText: edit.displayText })) }, null, 2), name: 'citation-provenance.json', mediaType: 'application/json' },
+      { role: 'mapping', content: JSON.stringify({ source: config.source, output: materialized.output, decisions: auditDecisions.map((decision) => ({ unitId: decision.unitId, status: decision.status, originalText: decision.originalText, displayText: decision.displayText, locator: decision.locator, ...(decision.suppliedReference ? { suppliedReference: decision.suppliedReference } : {}) })) }, null, 2), name: 'citation-provenance.json', mediaType: 'application/json' },
       { role: 'data', content: JSON.stringify({ schemaVersion: 1, styleId: config.styleId, styleFamily: config.styleFamily, fallback: config.styleFamily === 'numeric' ? 'vancouver' : 'apa-7th-edition' }, null, 2), name: 'citation-style.json', mediaType: 'application/json' },
     ],
     provenance: {
@@ -696,13 +852,30 @@ const prepareTool: OpenLabPluginTool<PluginExecutionContextV4> = {
   definition: {
     name: 'citation.prepare',
     title: '扫描与预览引用自动化',
-    description: '只读扫描源修订，验证可识别引用并生成 Zotero 最大写入预览。',
-    inputSchema: { type: 'object', properties: { instanceId: { type: 'string' } }, required: ['instanceId'], additionalProperties: false },
+    description: '先声明固定识别格式，再只读扫描源修订；可携带用户补充的规范论文信息生成新预览。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instanceId: { type: 'string' },
+        referenceOverrides: {
+          type: 'array',
+          maxItems: MAX_REFERENCE_OVERRIDES,
+          items: {
+            type: 'object',
+            properties: { unitId: { type: 'string', maxLength: 200 }, referenceText: { type: 'string', maxLength: MAX_OVERRIDE_TEXT } },
+            required: ['unitId', 'referenceText'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['instanceId'],
+      additionalProperties: false,
+    },
     risk: 'read',
     renderHint: 'generic',
     execution: { mode: 'long-running', timeoutMs: 10 * 60_000 },
   },
-  execute: async (input, context) => await prepare(String(input.instanceId ?? ''), context),
+  execute: async (input, context) => await prepare(String(input.instanceId ?? ''), normalizeReferenceOverrides(input.referenceOverrides), context),
 };
 
 const runTool: OpenLabPluginTool<PluginExecutionContextV4> = {
@@ -754,6 +927,16 @@ const workflow: OpenLabPluginWorkflow<PluginWorkflowContextV4> = {
       properties: {
         instanceId: { type: 'string' }, source: { type: 'object' }, operationKey: { type: 'string' }, styleId: { type: 'string' }, styleFamily: { type: 'string' },
         model: { type: 'string' }, maximumTotalTokens: { type: 'integer' }, collectionKey: { type: 'string' }, collectionRoot: { type: 'string' }, collectionChild: { type: 'string' }, retryUnitIds: { type: 'array', items: { type: 'string' } },
+        referenceOverrides: {
+          type: 'array',
+          maxItems: MAX_REFERENCE_OVERRIDES,
+          items: {
+            type: 'object',
+            properties: { unitId: { type: 'string', maxLength: 200 }, referenceText: { type: 'string', maxLength: MAX_OVERRIDE_TEXT } },
+            required: ['unitId', 'referenceText'],
+            additionalProperties: false,
+          },
+        },
       },
       required: ['instanceId', 'source', 'operationKey', 'styleId', 'styleFamily', 'model', 'maximumTotalTokens', 'collectionRoot', 'collectionChild'],
       additionalProperties: false,

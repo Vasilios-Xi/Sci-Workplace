@@ -20,6 +20,7 @@
     "package:win": "pnpm --filter @openlab/desktop package:win",
     "build:zotero-companion": "node scripts/build-zotero-companion.mjs",
     "test:citation-acceptance": "pnpm --filter @openlab/runtime build && pnpm --filter @openlab/citation-plugin build && node scripts/citation-workbench-acceptance.mjs",
+    "test:citation-scan-acceptance": "pnpm --filter @openlab/runtime build && pnpm --filter @openlab/citation-plugin build && node scripts/citation-workbench-acceptance.mjs --scan-only",
     "test:citation-word-smoke": "pwsh -NoProfile -File scripts/word-zotero-smoke.ps1 -InputPath \"acceptance/citation-workbench-v1/参考文献测试/参考文献测试.citation-revised.docx\" -OutputPath \"acceptance/citation-workbench-v1/word-smoke/参考文献测试.word-zotero-refresh.docx\" -ReceiptPath \"acceptance/citation-workbench-v1/word-smoke/word-zotero-smoke-receipt.json\" -ExpectedBibliographyText \"A statistical understanding of oxygen vacancies\"",
     "test:deepseek": "pnpm --filter @openlab/runtime test:deepseek",
     "dev": "concurrently -k -n renderer,desktop -c cyan,magenta \"pnpm --filter @openlab/renderer dev\" \"pnpm --filter @openlab/desktop dev\"",

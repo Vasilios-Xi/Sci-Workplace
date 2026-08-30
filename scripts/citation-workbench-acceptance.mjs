@@ -118,6 +118,7 @@ function dynamicBibliographyText(path) {
 
 const desktop = argument('--desktop', DEFAULT_DESKTOP);
 const outputRoot = argument('--output', DEFAULT_OUTPUT);
+const scanOnly = process.argv.includes('--scan-only');
 mkdirSync(outputRoot, { recursive: true });
 mkdirSync(join(outputRoot, '.cache'), { recursive: true });
 
@@ -212,6 +213,57 @@ const host = {
   workbenches: { mount: async () => ({}) },
 };
 
+if (scanOnly) {
+  const samples = [];
+  for (const sample of EXPECTED) {
+    const sourceBytes = readFileSync(join(desktop, sample.name));
+    const sourceSha256 = digest(sourceBytes);
+    if (sourceSha256 !== sample.sha256) throw new Error(`${sample.name} source hash changed: ${sourceSha256}`);
+    const stem = basename(sample.name, '.docx');
+    const source = { ref: { rootId: 'citation-acceptance-sources', path: sample.name }, sha256: sourceSha256, size: sourceBytes.length, mediaType: DOCX_MEDIA_TYPE };
+    const inspection = documents.scan(source);
+    const invalid = inspection.units.filter((unit) => !['recognized', 'needs_input'].includes(unit.recognitionStatus) || !unit.recognizedFormat);
+    if (invalid.length > 0) throw new Error(`${sample.name} contains units without a whitelist decision`);
+    const units = inspection.units.map((unit) => ({
+      unitId: unit.id,
+      kind: unit.kind,
+      recognitionStatus: unit.recognitionStatus,
+      recognizedFormat: unit.recognizedFormat,
+      originalText: unit.raw,
+      referenceOnly: unit.referenceOnly,
+      locator: {
+        part: unit.part,
+        paragraphIndex: unit.paragraphIndex,
+        paragraphNumber: unit.paragraphIndex + 1,
+        start: unit.start,
+        end: unit.end,
+        label: `${unit.part === 'word/document.xml' ? '正文' : unit.part === 'word/footnotes.xml' ? '脚注' : unit.part === 'word/endnotes.xml' ? '尾注' : unit.part}第 ${unit.paragraphIndex + 1} 段 · 段内字符 ${unit.start}–${unit.end}`,
+        context: unit.context,
+      },
+    }));
+    const result = {
+      sample: sample.name,
+      sourceSha256,
+      sourceHashUnchanged: digest(readFileSync(join(desktop, sample.name))) === sample.sha256,
+      detectedUnits: units.length,
+      recognized: units.filter((unit) => unit.recognitionStatus === 'recognized').length,
+      needsInput: units.filter((unit) => unit.recognitionStatus === 'needs_input').length,
+      formatCounts: Object.fromEntries([...new Set(units.map((unit) => unit.recognizedFormat))].sort().map((format) => [format, units.filter((unit) => unit.recognizedFormat === format).length])),
+      supportedInputFormats: inspection.supportedInputFormats,
+      units,
+      unrecognizedItems: units.filter((unit) => unit.recognitionStatus === 'needs_input'),
+    };
+    const sampleDirectory = join(outputRoot, stem);
+    mkdirSync(sampleDirectory, { recursive: true });
+    writeJson(join(sampleDirectory, 'whitelist-scan-acceptance.json'), result);
+    samples.push(result);
+    process.stdout.write(`${JSON.stringify({ event: 'scan_sample_complete', sample: sample.name, detectedUnits: result.detectedUnits, recognized: result.recognized, needsInput: result.needsInput })}\n`);
+  }
+  writeJson(join(outputRoot, 'whitelist-scan-summary.json'), { schemaVersion: 1, plugin: 'sci.citation-workbench', mode: 'fixed-format-scan-only', samples });
+  process.stdout.write(`${JSON.stringify({ event: 'scan_acceptance_complete', outputRoot, samples: samples.length })}\n`);
+  process.exit(0);
+}
+
 const startingStatus = await zotero.status();
 if (startingStatus.mode !== 'companion' && startingStatus.mode !== 'native-local-api') {
   throw new Error(`Zotero write provider unavailable: ${startingStatus.mode}`);
@@ -243,6 +295,7 @@ for (const sample of EXPECTED) {
     maximumTotalTokens: 60_000,
     collectionRoot: 'Sci Workplace',
     collectionChild: `${stem} · References`,
+    referenceOverrides: [],
     ...(collectionKey ? { collectionKey } : {}),
   };
   const result = await workflow.run(input, {

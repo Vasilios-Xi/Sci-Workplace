@@ -815,6 +815,44 @@ export type CitationUnitKindV1 =
   | 'reference-entry'
   | 'placeholder';
 
+export type CitationRecognizedFormatV1 =
+  | 'doi'
+  | 'pmid'
+  | 'arxiv'
+  | 'labeled-title'
+  | 'structured-reference'
+  | 'zotero-field'
+  | 'endnote-field'
+  | 'mapped-numeric'
+  | 'pandoc-zotero-key'
+  | 'tex-citation-key'
+  | 'unsupported';
+
+export interface CitationSupportedInputFormatV1 {
+  id: Exclude<CitationRecognizedFormatV1, 'unsupported' | 'mapped-numeric'> | 'numeric-mapped-reference';
+  label: string;
+  description: string;
+  examples: readonly string[];
+}
+
+/**
+ * Citation Workbench v1 intentionally uses a small, explicit recognition
+ * whitelist. Keep this list shared by the scanner and bundled panel so the UI
+ * never promises a format that the deterministic parser does not accept.
+ */
+export const CITATION_SUPPORTED_INPUT_FORMATS_V1: readonly CitationSupportedInputFormatV1[] = [
+  { id: 'doi', label: 'DOI', description: '裸 DOI、DOI: 前缀或 doi.org URL；整行只能对应一篇论文。', examples: ['10.1038/s41467-024-00000-0', 'DOI: 10.1038/s41467-024-00000-0', 'https://doi.org/10.1038/s41467-024-00000-0'] },
+  { id: 'pmid', label: 'PMID', description: '必须带 PMID: 前缀。', examples: ['PMID: 12345678'] },
+  { id: 'arxiv', label: 'arXiv', description: '必须使用 arXiv: 前缀或 arxiv.org/abs URL。', examples: ['arXiv: 2401.01234', 'https://arxiv.org/abs/2401.01234'] },
+  { id: 'labeled-title', label: '完整题名', description: '必须带 Title: 或 题名：标签，并提供完整、逐字准确的论文题名。', examples: ['Title: A complete and exact scholarly article title', '题名：A complete and exact scholarly article title'] },
+  { id: 'structured-reference', label: '结构化参考文献行', description: '接受单条 APA、Vancouver 或 GB/T 风格记录；必须能确定题名与年份，建议同时包含 DOI。', examples: ['Smith J. Exact article title. Journal. 2024;12(3):1-9. doi:10.1234/example', 'Smith, J. (2024). Exact article title. Journal, 12(3), 1-9. https://doi.org/10.1234/example'] },
+  { id: 'zotero-field', label: 'Zotero Word 字段', description: '识别真实 ADDIN ZOTERO_ITEM CSL_CITATION 动态字段；不把普通显示文本冒充为 Zotero 字段。', examples: ['Word 中由 Zotero 插入的动态引用字段'] },
+  { id: 'endnote-field', label: 'EndNote Word 字段', description: '识别真实 ADDIN EN.CITE / EN.CITE.DATA 动态字段。', examples: ['Word 中由 EndNote 插入的动态引用字段'] },
+  { id: 'numeric-mapped-reference', label: '已映射数字引用', description: '方括号或上标数字必须完整映射到参考文献表中符合上述格式的条目；引用簇按原子单元处理。', examples: ['[1]', '[1,3-5]', '上标 1–3'] },
+  { id: 'pandoc-zotero-key', label: 'Pandoc 引用键', description: 'Markdown 中使用一个或多个显式 @ZoteroKey。', examples: ['[@ABCD1234]', '[@ABCD1234; @EFGH5678]'] },
+  { id: 'tex-citation-key', label: 'TeX 引用键', description: '保留 natbib/biblatex 命令，并按显式键查询 Zotero。', examples: ['\\cite{ABCD1234}', '\\parencite{ABCD1234,EFGH5678}'] },
+] as const;
+
 export interface BibliographicCreatorV1 {
   family: string;
   given?: string;
@@ -866,6 +904,10 @@ export interface CitationDocumentUnitV1 {
   context: string;
   kind: CitationUnitKindV1;
   referenceOnly: boolean;
+  /** Deterministic whitelist result; absent only for older v4 hosts. */
+  recognitionStatus?: 'recognized' | 'needs_input';
+  /** Exact whitelist branch used for this unit. */
+  recognizedFormat?: CitationRecognizedFormatV1;
   /** One member for a simple citation; multiple members for an atomic numeric cluster. */
   identifiers?: CitationIdentifierV1[];
   numericLabels?: number[];
@@ -878,6 +920,7 @@ export interface CitationDocumentInspectionV1 {
   detectedStyleFamily: CitationStyleFamilyV1;
   units: CitationDocumentUnitV1[];
   warnings: string[];
+  supportedInputFormats?: readonly CitationSupportedInputFormatV1[];
 }
 
 export interface BibliographyQueryV1 {

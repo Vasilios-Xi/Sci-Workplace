@@ -109,8 +109,10 @@ export type {
   CitationDocumentUnitV1,
   CitationIdentifierV1,
   CitationMaterializationReceiptV1,
+  CitationRecognizedFormatV1,
   CitationSourceFormatV1,
   CitationStyleFamilyV1,
+  CitationSupportedInputFormatV1,
   CitationUnitKindV1,
   GeneratedWorktableApp,
   EvidenceAnchorV1,
@@ -143,6 +145,8 @@ export type {
   ZoteroSyncPlanV1,
   ZoteroSyncReceiptV1,
 } from '@openlab/protocol';
+
+export { CITATION_SUPPORTED_INPUT_FORMATS_V1 } from '@openlab/protocol';
 
 export const OPENLAB_PLUGIN_API_VERSION = 4 as const;
 

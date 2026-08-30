@@ -8,7 +8,7 @@
     :root { color-scheme: light dark; font-family: Inter, "Microsoft YaHei", system-ui, sans-serif; background:#10151d; color:#e8edf4; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; background:radial-gradient(circle at 20% 0,#1d3145 0,transparent 38%),#10151d; }
-    button { font:inherit; }
+    button, textarea { font:inherit; }
     .shell { display:flex; flex-direction:column; min-height:100vh; }
     header { padding:16px 18px 10px; border-bottom:1px solid #2b3746; background:#111923dc; backdrop-filter:blur(12px); }
     .eyebrow { color:#75c5ba; font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
@@ -41,6 +41,26 @@
     .item.applied .status { color:#74d89b; }
     .item.skipped .status { color:#f0bd6f; }
     .item p { margin:6px 0 0; color:#b9c5d1; font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+    .formats { margin-bottom:12px; padding:12px; border:1px solid #4b6f69; border-radius:10px; background:#142723; }
+    .formats summary { cursor:pointer; color:#dffcf5; font-size:13px; font-weight:700; }
+    .formats > p { margin:8px 0 10px; color:#b7d8d1; font-size:11px; line-height:1.55; }
+    .format-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:7px; }
+    .format { padding:8px 9px; border:1px solid #33514d; border-radius:8px; background:#10201e; }
+    .format strong { display:block; color:#86d9ca; font-size:11px; }
+    .format span { display:block; margin-top:3px; color:#a8bbb7; font-size:10px; line-height:1.45; }
+    .item-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+    .mini { padding:5px 8px; border:1px solid #40566a; border-radius:6px; background:#172532; color:#dce8f3; font-size:10px; cursor:pointer; }
+    .correction { margin-top:9px; }
+    .correction label { display:block; margin-bottom:5px; color:#91a4b5; font-size:10px; }
+    .correction textarea { width:100%; min-height:68px; resize:vertical; padding:7px 8px; border:1px solid #3a4b5d; border-radius:7px; outline:none; background:#0d151e; color:#e8edf4; font-size:11px; line-height:1.45; }
+    .correction textarea:focus { border-color:#62a99e; box-shadow:0 0 0 2px #2e6d6438; }
+    .locator { margin-top:10px; padding:11px; border:1px solid #547068; border-radius:9px; background:#101d1b; }
+    .locator header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:0 0 8px; border:0; background:transparent; }
+    .locator blockquote { margin:0; padding:9px; border-left:3px solid #4f9e91; background:#0d1716; color:#b9c9c5; font-size:11px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .locator mark { padding:2px 3px; border-radius:3px; background:#ffd66b; color:#251d08; }
+    .locator dl { display:grid; grid-template-columns:max-content 1fr; gap:4px 9px; margin:9px 0 0; font-size:10px; }
+    .locator dt { color:#779087; }
+    .locator dd { margin:0; color:#c8d7d2; overflow-wrap:anywhere; }
     .empty { padding:28px 12px; text-align:center; color:#8492a2; font-size:12px; }
     .progress { height:6px; overflow:hidden; border-radius:99px; background:#26313e; }
     .progress span { display:block; height:100%; background:linear-gradient(90deg,#4b8c83,#73c8bc); transition:width .25s; }
@@ -63,10 +83,24 @@
     <button data-view="outputs">输出</button>
   </nav>
   <main>
+    <details class="formats" open>
+      <summary>引用前请确认：插件只识别以下固定格式</summary>
+      <p>不在清单内的题名猜测、孤立数字、模糊作者—年份文本和占位符不会自动匹配。扫描后会逐项列出并给出原文位置；你可按下列格式补充后重新预览。</p>
+      <div class="format-grid" id="format-list">
+        <div class="format"><strong>DOI</strong><span>裸 DOI、DOI: 前缀或 doi.org URL</span></div>
+        <div class="format"><strong>PMID</strong><span>必须写为 PMID: 12345678</span></div>
+        <div class="format"><strong>arXiv</strong><span>arXiv: 2401.01234 或 arxiv.org/abs URL</span></div>
+        <div class="format"><strong>完整题名</strong><span>必须带 Title: 或 题名：标签</span></div>
+        <div class="format"><strong>结构化参考文献</strong><span>一行一篇 APA、Vancouver 或 GB/T 记录</span></div>
+        <div class="format"><strong>Zotero / EndNote Word 字段</strong><span>只识别真实动态字段，不识别伪装显示文本</span></div>
+        <div class="format"><strong>已映射数字引用</strong><span>数字簇须完整映射到合规参考文献条目</span></div>
+        <div class="format"><strong>Markdown / TeX 键</strong><span>显式 Pandoc @key 或 natbib/biblatex 引用键</span></div>
+      </div>
+    </details>
     <div class="toolbar">
       <button id="prepare" class="action">扫描与预览</button>
       <button id="run" class="action primary" disabled>确认后整批执行</button>
-      <button id="recheck" class="action" disabled>重新检查待核对项</button>
+      <button id="recheck" class="action" disabled>验证补充信息并重新预览</button>
       <button id="cancel" class="action danger" disabled>取消运行</button>
     </div>
     <p id="message" class="notice">正在连接工作台…</p>
@@ -81,7 +115,7 @@
       </div></div>
     </section>
     <section id="applied" class="view" hidden><div id="applied-list" class="list"></div></section>
-    <section id="skipped" class="view" hidden><div id="skipped-list" class="list"></div></section>
+    <section id="skipped" class="view" hidden><div id="skipped-list" class="list"></div><aside id="source-locator"></aside></section>
     <section id="zotero" class="view" hidden><div id="zotero-grid" class="grid"></div><div class="section"><h2>条目回执</h2><div id="zotero-list" class="list"></div></div></section>
     <section id="outputs" class="view" hidden><div id="output-list" class="list"></div></section>
   </main>
@@ -96,6 +130,8 @@
   let preview;
   let audit;
   let activeJob;
+  let locatedUnitId;
+  const manualOverrides = new Map();
   const $ = (id) => document.getElementById(id);
   const record = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -130,13 +166,63 @@
     node.innerHTML = cards.map(([label, value, detail]) => `<div class="card"><label>${esc(label)}</label><strong>${esc(value)}</strong>${detail ? `<small>${esc(detail)}</small>` : ''}</div>`).join('');
   }
 
+  function captureOverrides() {
+    document.querySelectorAll('textarea[data-override]').forEach((field) => {
+      const value = field.value.trim();
+      if (value) manualOverrides.set(field.dataset.override, value);
+      else manualOverrides.delete(field.dataset.override);
+    });
+  }
+
+  function visibleDecisions() {
+    const previewItems = Array.isArray(preview?.recognitionItems) ? preview.recognitionItems : [];
+    if (previewItems.length) return previewItems.map((item) => ({ ...item, status:item.identityStatus, displayText:item.originalText, preflight:true }));
+    return Array.isArray(audit?.decisions) ? audit.decisions : [];
+  }
+
+  function sourceDocument() {
+    const raw = record(preview?.source) || record(audit?.source) || record(context?.worktable?.inputs?.source);
+    if (!raw) return undefined;
+    if (record(raw.ref)) return raw;
+    if (!raw.rootId || !raw.path || !raw.sha256) return undefined;
+    return { ref:{rootId:raw.rootId,path:raw.path}, sha256:raw.sha256, ...(raw.size !== undefined ? {size:raw.size} : {}), ...(raw.mediaType ? {mediaType:raw.mediaType} : {}) };
+  }
+
+  function renderLocator(items) {
+    const host = $('source-locator');
+    const item = items.find((candidate) => candidate.unitId === locatedUnitId);
+    if (!item) { host.innerHTML = ''; return; }
+    const locator = record(item.locator) || {};
+    let before = String(locator.before || '');
+    let target = String(locator.target || item.originalText || '');
+    let after = String(locator.after || '');
+    if (!before && !after && item.context) {
+      const index = String(item.context).indexOf(String(item.originalText || ''));
+      if (index >= 0) {
+        before = String(item.context).slice(0,index);
+        target = String(item.originalText || '');
+        after = String(item.context).slice(index + target.length);
+      } else after = String(item.context);
+    }
+    host.innerHTML = `<div class="locator"><header><strong>原文定位</strong><button class="mini" data-close-locator>关闭</button></header><blockquote>${esc(before)}<mark>${esc(target)}</mark>${esc(after)}</blockquote><dl><dt>位置</dt><dd>${esc(locator.label || '位置未记录')}</dd><dt>引用单元</dt><dd class="mono">${esc(item.unitId)}</dd><dt>识别格式</dt><dd>${esc(item.recognizedFormat || 'unsupported')}</dd><dt>字符范围</dt><dd>${esc(`${locator.start ?? '—'}–${locator.end ?? '—'}`)}</dd></dl></div>`;
+    host.scrollIntoView({ behavior:'smooth', block:'nearest' });
+  }
+
   function renderDecisions() {
-    const decisions = Array.isArray(audit?.decisions) ? audit.decisions : [];
+    captureOverrides();
+    const decisions = visibleDecisions();
     const applied = decisions.filter((item) => item.status === 'applied');
     const skipped = decisions.filter((item) => item.status !== 'applied');
-    $('applied-list').innerHTML = applied.length ? applied.map((item) => `<div class="item applied"><div class="top"><code>${esc(item.unitId)}</code><span class="status">applied</span></div><p>${esc(item.originalText)} → <strong>${esc(item.displayText)}</strong></p>${item.supportEvidence ? `<p>证据：${esc(item.supportEvidence)}</p>` : ''}</div>`).join('') : '<div class="empty">尚无已应用引用。</div>';
-    $('skipped-list').innerHTML = skipped.length ? skipped.map((item) => `<div class="item skipped"><div class="top"><code>${esc(item.unitId)}</code><span class="status">${esc(item.status)}</span></div><p>${esc(item.reason)}</p><p>原文保留：${esc(item.originalText)}</p></div>`).join('') : '<div class="empty">当前没有待核对引用。</div>';
-    $('recheck').disabled = !preview || skipped.length === 0;
+    for (const item of decisions) if (!manualOverrides.has(item.unitId) && item.suppliedReference) manualOverrides.set(item.unitId, String(item.suppliedReference));
+    $('applied-list').innerHTML = applied.length ? applied.map((item) => `<div class="item applied"><div class="top"><code>${esc(item.unitId)}</code><span class="status">${item.preflight ? 'identity_ready' : 'applied'}</span></div><p>${esc(item.originalText)}${item.preflight ? ' · 固定格式与元数据预检通过' : ` → <strong>${esc(item.displayText)}</strong>`}</p><p>${esc(record(item.locator)?.label || '')}</p>${item.supportEvidence ? `<p>证据：${esc(item.supportEvidence)}</p>` : ''}</div>`).join('') : '<div class="empty">尚无已应用或预检通过的引用。</div>';
+    $('skipped-list').innerHTML = skipped.length ? skipped.map((item) => {
+      const expected = Number(item.expectedMembers || 1);
+      const supplied = manualOverrides.get(item.unitId) || '';
+      return `<div class="item skipped" data-unit-card="${esc(item.unitId)}"><div class="top"><code>${esc(item.unitId)}</code><span class="status">${esc(item.status || 'unrecognized')}</span></div><p>${esc(item.reason)}</p><p><strong>原文保留：</strong>${esc(item.originalText)}</p><p>${esc(record(item.locator)?.label || '位置未记录')} · 检测为 ${esc(item.recognizedFormat || 'unsupported')}</p><div class="item-actions"><button class="mini" data-locate="${esc(item.unitId)}">定位到原文</button></div><div class="correction"><label>提供正确格式的论文信息${expected > 1 ? `（该引用簇需逐行提供 ${expected} 篇）` : '（一行一篇）'}</label><textarea data-override="${esc(item.unitId)}" placeholder="DOI: 10.…&#10;或 PMID: … / arXiv: … / Title: 完整题名 / 单条结构化参考文献">${esc(supplied)}</textarea></div></div>`;
+    }).join('') : '<div class="empty">当前没有待核对引用。</div>';
+    renderLocator(skipped);
+    const hasCorrections = skipped.some((item) => Boolean(manualOverrides.get(item.unitId)?.trim()));
+    $('recheck').disabled = skipped.length === 0 || !hasCorrections || ['queued','running'].includes(activeJob?.status);
   }
 
   function renderZotero() {
@@ -166,6 +252,7 @@
     renderCards($('overview-grid'), [
       ['源修订', source?.ref?.path || source?.path || '未选择', preview?.sourceSha256 || source?.sha256 || ''],
       ['检测引用', number(preview?.detectedUnits ?? audit?.detectedUnits), `身份预检通过 ${number(preview?.identityEligibleUnits)}`],
+      ['固定格式门禁', preview ? '已执行' : '等待扫描', `待补充 ${number(preview?.currentlySkippedUnits)}`],
       ['目标样式', preview?.styleId || audit?.styleId || '—', preview?.styleFamily || audit?.styleFamily || ''],
       ['AI 模型', preview?.model || audit?.model || '—', `上限 ${number(preview?.maximumTotalTokens || audit?.maximumTotalTokens)} tokens`],
       ['预计模型调用', number(preview?.semanticModelCallsMaximum), `预计 ${number(preview?.estimatedTotalTokens)} tokens`],
@@ -174,7 +261,7 @@
     if (job) {
       const progress = Math.round(Number(job.progress || 0) * 100);
       $('run-state').innerHTML = `<div class="item"><div class="top"><strong>${esc(job.stage || job.spec?.title || '引用工作流')}</strong><span class="status">${esc(job.status)}</span></div><p>${progress}%</p><div class="progress"><span style="width:${Math.max(0,Math.min(100,progress))}%"></span></div>${job.error ? `<p>${esc(job.error)}</p>` : ''}</div>`;
-    } else $('run-state').innerHTML = '<div class="empty">先执行“扫描与预览”。预览会固定源哈希、模型、token 上限、样式与集合。</div>';
+    } else $('run-state').innerHTML = '<div class="empty">先阅读上方格式清单，再执行“扫描与预览”。预览会固定源哈希、用户补充信息、模型、token 上限、样式与集合。</div>';
     $('run').disabled = !preview?.previewToken || ['queued','running'].includes(job?.status);
     $('cancel').disabled = !job || !['queued','running','paused','interrupted'].includes(job.status);
   }
@@ -186,9 +273,10 @@
     renderDecisions();
     renderZotero();
     renderOutputs();
-    if (audit?.readiness === 'partial_review_required') message('运行完成：可识别部分已处理，仍有待核对项；原文均保持不变。', 'warning');
+    if (activeJob?.status === 'running' || activeJob?.status === 'queued') message(`正在运行：${activeJob.stage || '等待任务调度'}。`);
+    else if (preview?.previewToken) message(`固定格式预览已生成：${number(preview.identityEligibleUnits)} 个单元通过预检，${number(preview.currentlySkippedUnits)} 个待补充。`, preview.currentlySkippedUnits ? 'warning' : '');
+    else if (audit?.readiness === 'partial_review_required') message('运行完成：可识别部分已处理，仍有待核对项；原文均保持不变。', 'warning');
     else if (audit?.readiness === 'submission_ready') message('运行完成：全部检测引用均通过，输出标记为 submission_ready。');
-    else if (activeJob?.status === 'running' || activeJob?.status === 'queued') message(`正在运行：${activeJob.stage || '等待任务调度'}。`);
   }
 
   async function refresh() {
@@ -204,8 +292,10 @@
   });
   $('prepare').addEventListener('click', async () => {
     try {
-      $('prepare').disabled = true; message('正在只读扫描并生成写入上限预览…');
-      const result = await rpc('tool.execute', { tool:'citation.prepare', params:{ instanceId: context?.worktable?.instanceId } });
+      captureOverrides();
+      $('prepare').disabled = true; message('正在按上方固定格式只读扫描并生成写入上限预览…');
+      const referenceOverrides = [...manualOverrides.entries()].filter(([,referenceText]) => referenceText.trim()).map(([unitId,referenceText]) => ({unitId,referenceText}));
+      const result = await rpc('tool.execute', { tool:'citation.prepare', params:{ instanceId: context?.worktable?.instanceId, referenceOverrides } });
       preview = record(result?.metadata);
       message(result?.content || '预览已完成。请核对参数后整批执行。');
       render();
@@ -221,10 +311,45 @@
   });
   $('recheck').addEventListener('click', async () => {
     try {
-      const retryUnitIds = (Array.isArray(audit?.decisions) ? audit.decisions : []).filter((item) => item.status !== 'applied').map((item) => item.unitId);
-      const result = await rpc('tool.execute', { tool:'citation.recheck', params:{ instanceId: context?.worktable?.instanceId, previewToken: preview?.previewToken, retryUnitIds } });
-      message(result?.content || '重新检查已启动。'); preview = undefined; await refresh();
+      captureOverrides();
+      const referenceOverrides = [...manualOverrides.entries()].filter(([,referenceText]) => referenceText.trim()).map(([unitId,referenceText]) => ({unitId,referenceText}));
+      if (!referenceOverrides.length) throw new Error('请先为至少一个待核对项提供正确格式的论文信息');
+      message('正在验证补充信息并重新生成绑定预览…');
+      const result = await rpc('tool.execute', { tool:'citation.prepare', params:{ instanceId: context?.worktable?.instanceId, referenceOverrides } });
+      preview = record(result?.metadata);
+      message(result?.content || '补充信息已验证，请核对新预览后确认整批执行。');
+      render();
     } catch (error) { message(error.message || String(error), 'error'); }
+  });
+  $('skipped-list').addEventListener('input', (event) => {
+    const field = event.target.closest?.('textarea[data-override]');
+    if (!field) return;
+    const value = field.value.trim();
+    if (value) manualOverrides.set(field.dataset.override, value); else manualOverrides.delete(field.dataset.override);
+    $('recheck').disabled = manualOverrides.size === 0 || ['queued','running'].includes(activeJob?.status);
+  });
+  $('skipped-list').addEventListener('click', async (event) => {
+    const button = event.target.closest?.('button[data-locate]');
+    if (!button) return;
+    locatedUnitId = button.dataset.locate;
+    const items = visibleDecisions().filter((item) => item.status !== 'applied');
+    const item = items.find((candidate) => candidate.unitId === locatedUnitId);
+    renderLocator(items);
+    const document = sourceDocument();
+    const locator = record(item?.locator);
+    if (!document || !item) return;
+    try {
+      await rpc('evidence.reveal', {
+        document,
+        selector:{ kind:'document-anchor', scheme:'sci.citation-workbench.unit.v1', anchor:item.unitId, start:Number(locator?.start || 0), end:Number(locator?.end || 0), exact:String(item.originalText || '') },
+        target:{ panelId:'citation-workbench' },
+      });
+    } catch (error) { message(`已显示本地原文坐标；工作台锚点记录失败：${error.message || error}`, 'warning'); }
+  });
+  $('source-locator').addEventListener('click', (event) => {
+    if (!event.target.closest?.('[data-close-locator]')) return;
+    locatedUnitId = undefined;
+    $('source-locator').innerHTML = '';
   });
   $('cancel').addEventListener('click', async () => {
     try { await rpc('tool.execute', { tool:'citation.cancel', params:{ jobId: activeJob?.id } }); await refresh(); }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
 import AdmZip from 'adm-zip';
+import { CITATION_SUPPORTED_INPUT_FORMATS_V1 } from '@openlab/protocol';
 import type {
   CitationDocumentEditV1,
   CitationDocumentInspectionV1,
@@ -9,6 +10,7 @@ import type {
   CitationDocumentUnitV1,
   CitationIdentifierV1,
   CitationMaterializationReceiptV1,
+  CitationRecognizedFormatV1,
   CitationSourceFormatV1,
   CitationUnitKindV1,
   DocumentRevisionRef,
@@ -18,7 +20,9 @@ import { PathGuard } from '../security/path-guard.js';
 const DOCX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const DOI_PATTERN = /(?:https?:\/\/(?:dx\.)?doi\.org\/|doi\s*:\s*)?(10\.\d{4,9}\/[A-Z0-9._;()/:+-]+)/giu;
 const PMID_PATTERN = /\bPMID\s*:\s*(\d{5,9})\b/giu;
-const ARXIV_PATTERN = /\b(?:arXiv\s*:\s*)?(\d{4}\.\d{4,5}(?:v\d+)?)\b/giu;
+const ARXIV_PATTERN = /(?:\barXiv\s*:\s*|https?:\/\/(?:www\.)?arxiv\.org\/abs\/)(\d{4}\.\d{4,5}(?:v\d+)?)\b/giu;
+const BARE_ARXIV_PATTERN = /\b(\d{4}\.\d{4,5}(?:v\d+)?)\b/giu;
+const LABELED_TITLE_PATTERN = /^(?:Title|题名)\s*[:：]\s*(.+)$/iu;
 const PLACEHOLDER_PATTERN = /\[\s*XX\s*\]|找参考文献/giu;
 const NUMERIC_CLUSTER_PATTERN = /\[(\s*\d+(?:\s*[-–—,;]\s*\d+)*\s*)\]/gu;
 const AUTHOR_DATE_PATTERN = /\((?:[A-ZÀ-ÖØ-Þ\u4e00-\u9fff][^();]{1,50}?\s+(?:et\s+al\.?\s*,?\s*)?\d{4}[a-z]?(?:\s*;\s*)?)+\)/gu;
@@ -43,6 +47,13 @@ interface Candidate {
   xmlStart?: number;
   xmlEnd?: number;
   priority: number;
+  recognitionStatus?: 'recognized' | 'needs_input';
+  recognizedFormat?: CitationRecognizedFormatV1;
+}
+
+interface FixedRecognition {
+  identifiers: CitationIdentifierV1[];
+  format: CitationRecognizedFormatV1;
 }
 
 interface DocxPart {
@@ -138,26 +149,75 @@ function doiMatches(text: string): Array<{ start: number; end: number; raw: stri
   return output;
 }
 
-function identifiersFromText(raw: string, titleFallback = false): CitationIdentifierV1[] {
+function structuredReferenceTitle(raw: string): { title: string; year?: number; firstAuthor?: string } | undefined {
+  const value = stripReferenceLabel(raw).replace(/\s+/gu, ' ').trim();
+  const firstAuthor = value.match(/^([\p{L}'’-]{2,})/u)?.[1];
+  const apa = value.match(/^.{2,220}?\s+\(((?:19|20)\d{2})[a-z]?\)\.\s+(.{18,500}?)\.\s+.{2,}$/u);
+  if (apa?.[2]) return { title: apa[2].trim(), year: Number(apa[1]), ...(firstAuthor ? { firstAuthor } : {}) };
+  const gbt = value.match(/^.{2,220}?\.\s+(.{18,500}?)\s*\[[Jj]\]\.?\s+.+?\b((?:19|20)\d{2})\b/u);
+  if (gbt?.[1]) return { title: gbt[1].trim(), year: Number(gbt[2]), ...(firstAuthor ? { firstAuthor } : {}) };
+  const segments = value.split(/\.\s+/u).map((item) => item.trim()).filter(Boolean);
+  if (segments.length < 3 || !segments[1] || segments[1].length < 18 || !/\b(?:19|20)\d{2}\b/u.test(segments.slice(2).join('. '))) return undefined;
+  const authorSegment = segments[0] ?? '';
+  if (!/[;,]|\b[\p{Lu}]\.?$/u.test(authorSegment) || authorSegment.length > 220) return undefined;
+  const year = Number(segments.slice(2).join('. ').match(/\b((?:19|20)\d{2})\b/u)?.[1] ?? 0) || undefined;
+  return { title: segments[1], ...(year ? { year } : {}), ...(firstAuthor ? { firstAuthor } : {}) };
+}
+
+function fixedRecognitionFromText(raw: string, allowStructuredReference = false): FixedRecognition {
   const dois = [...new Set(doiMatches(raw).map((match) => match.doi))];
   const pmids = [...new Set([...raw.matchAll(PMID_PATTERN)].map((match) => match[1]).filter((value): value is string => Boolean(value)))];
   const arxivIds = [...new Set([...raw.matchAll(ARXIV_PATTERN)].map((match) => match[1]?.replace(/v\d+$/iu, '')).filter((value): value is string => Boolean(value)))];
-  const year = [...raw.matchAll(/\b(?:19|20)\d{2}\b/gu)].at(-1)?.[0];
-  const firstAuthor = stripReferenceLabel(raw).match(/^([\p{L}'’-]{2,})/u)?.[1];
   const identifierCount = dois.length + pmids.length + arxivIds.length;
-  if (identifierCount === 1) return [{ ...(dois[0] ? { doi: dois[0] } : {}), ...(pmids[0] ? { pmid: pmids[0] } : {}), ...(arxivIds[0] ? { arxivId: arxivIds[0] } : {}), ...(year ? { year: Number(year) } : {}), ...(firstAuthor ? { firstAuthor } : {}) }];
-  if (identifierCount > 1) return [...dois.map((doi) => ({ doi })), ...pmids.map((pmid) => ({ pmid })), ...arxivIds.map((arxivId) => ({ arxivId }))];
-  if (!titleFallback) return [];
-  const withoutLabel = stripReferenceLabel(raw).replace(/https?:\/\/\S+/giu, '').trim();
-  const sentenceCandidates = withoutLabel.split(/\.\s+/u).map((item) => item.trim()).filter((item) => {
-    const words = item.split(/\s+/u).filter(Boolean);
-    return item.length >= 18 && words.length >= 3 && !/^https?:/iu.test(item) && !/^(?:vol\.?|doi\b|pmid\b)/iu.test(item);
-  });
-  const likelyTitle = sentenceCandidates.length > 1
-    ? sentenceCandidates.slice(1).sort((left, right) => right.length - left.length)[0]
-    : sentenceCandidates[0];
-  if (!likelyTitle) return [];
-  return [{ title: likelyTitle.replace(/[.;,]+$/u, '').trim(), ...(year ? { year: Number(year) } : {}), ...(firstAuthor ? { firstAuthor } : {}) }];
+  const structured = allowStructuredReference ? structuredReferenceTitle(raw) : undefined;
+  if (identifierCount > 1) return { identifiers: [], format: 'unsupported' };
+  if (identifierCount === 1) {
+    const identifiers: CitationIdentifierV1[] = [{
+      ...(dois[0] ? { doi: dois[0] } : {}),
+      ...(pmids[0] ? { pmid: pmids[0] } : {}),
+      ...(arxivIds[0] ? { arxivId: arxivIds[0] } : {}),
+      ...(structured?.year ? { year: structured.year } : {}),
+      ...(structured?.firstAuthor ? { firstAuthor: structured.firstAuthor } : {}),
+    }];
+    const onlyIdentifier = stripReferenceLabel(raw).replace(DOI_PATTERN, '').replace(PMID_PATTERN, '').replace(ARXIV_PATTERN, '').replace(/[\s.,;:()[\]]+/gu, '').length === 0;
+    const format: CitationRecognizedFormatV1 = structured
+      ? 'structured-reference'
+      : onlyIdentifier && dois.length > 0 ? 'doi'
+      : onlyIdentifier && pmids.length > 0 ? 'pmid'
+      : onlyIdentifier && arxivIds.length > 0 ? 'arxiv'
+      : allowStructuredReference ? 'structured-reference'
+      : dois.length > 0 ? 'doi'
+      : pmids.length > 0 ? 'pmid'
+      : 'arxiv';
+    return { identifiers, format };
+  }
+  const labeled = stripReferenceLabel(raw).match(LABELED_TITLE_PATTERN);
+  if (labeled?.[1]) {
+    const title = labeled[1].replace(/[.;,]+$/u, '').trim();
+    if (title.length >= 18) return { identifiers: [{ title }], format: 'labeled-title' };
+  }
+  if (structured) return { identifiers: [{ title: structured.title, ...(structured.year ? { year: structured.year } : {}), ...(structured.firstAuthor ? { firstAuthor: structured.firstAuthor } : {}) }], format: 'structured-reference' };
+  return { identifiers: [], format: 'unsupported' };
+}
+
+function identifiersFromText(raw: string, allowStructuredReference = false): CitationIdentifierV1[] {
+  return fixedRecognitionFromText(raw, allowStructuredReference).identifiers;
+}
+
+function recognitionFields(recognition: FixedRecognition): Pick<Candidate, 'identifiers' | 'recognitionStatus' | 'recognizedFormat'> {
+  return {
+    identifiers: recognition.identifiers,
+    recognitionStatus: recognition.identifiers.length > 0 ? 'recognized' : 'needs_input',
+    recognizedFormat: recognition.format,
+  };
+}
+
+function mappedNumericRecognition(labels: number[], references: Map<number, FixedRecognition>): FixedRecognition {
+  const mapped = labels.map((label) => references.get(label));
+  if (labels.length === 0 || mapped.some((recognition) => !recognition || recognition.identifiers.length !== 1 || recognition.format === 'unsupported')) {
+    return { identifiers: [], format: 'unsupported' };
+  }
+  return { identifiers: mapped.flatMap((recognition) => recognition!.identifiers), format: 'mapped-numeric' };
 }
 
 function plainXml(value: string): string {
@@ -221,7 +281,7 @@ function xmlVisibleText(value: string): string {
   return [...value.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/gu)].map((match) => decodeXml(match[1] ?? '')).join('');
 }
 
-function fieldCandidates(paragraphXml: string, referenceIdentifiers: Map<number, CitationIdentifierV1[]>): Candidate[] {
+function fieldCandidates(paragraphXml: string, referenceIdentifiers: Map<number, FixedRecognition>): Candidate[] {
   const markers = [...paragraphXml.matchAll(/<w:fldChar\b[^>]*w:fldCharType=["'](begin|separate|end)["'][^>]*\/?\s*>/gu)];
   const stack: Array<{ begin: RegExpMatchArray; separate?: RegExpMatchArray }> = [];
   const output: Candidate[] = [];
@@ -248,13 +308,17 @@ function fieldCandidates(paragraphXml: string, referenceIdentifiers: Map<number,
     if (xmlStart < 0 || endRun < 0) continue;
     const labels = numericLabels(raw.replace(/^\[|\]$/gu, ''));
     const embedded = isEndNote ? endNoteIdentifiers(code) : zoteroIdentifiers(code);
+    const fallback = mappedNumericRecognition(labels, referenceIdentifiers);
+    const identifiers = embedded.length > 0 ? embedded : fallback.identifiers;
     output.push({
       start,
       end: start + raw.length,
       raw,
       kind: isEndNote ? 'endnote-field' : 'zotero-field',
       ...(labels.length > 0 ? { numericLabels: labels } : {}),
-      identifiers: embedded.length > 0 ? embedded : labels.flatMap((label) => referenceIdentifiers.get(label) ?? []),
+      identifiers,
+      recognitionStatus: identifiers.length > 0 ? 'recognized' : 'needs_input',
+      recognizedFormat: isEndNote ? 'endnote-field' : 'zotero-field',
       xmlStart,
       xmlEnd: endRun + '</w:r>'.length,
       priority: 120,
@@ -263,7 +327,7 @@ function fieldCandidates(paragraphXml: string, referenceIdentifiers: Map<number,
   return output;
 }
 
-function superscriptCandidates(paragraphXml: string, visibleText: string): Candidate[] {
+function superscriptCandidates(paragraphXml: string, visibleText: string, references: Map<number, FixedRecognition>): Candidate[] {
   const output: Candidate[] = [];
   let searchFrom = 0;
   for (const match of paragraphXml.matchAll(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/gu)) {
@@ -276,7 +340,8 @@ function superscriptCandidates(paragraphXml: string, visibleText: string): Candi
     const after = visibleText.slice(offset + runText.length, offset + runText.length + 4);
     if (offset < 0 || !/<w:vertAlign\b[^>]*w:val=["']superscript["']/iu.test(run) || !/^\s*\d+(?:\s*[-–—,;]\s*\d+)*\s*$/u.test(runText)) continue;
     if (/[A-Za-zΑ-ω]\s*$/u.test(before) || /^\s*[A-Za-zΑ-ω\d]/u.test(after)) continue;
-    output.push({ start: offset, end: offset + runText.length, raw: runText, kind: 'numeric-cluster', numericLabels: numericLabels(runText), priority: 70 });
+    const labels = numericLabels(runText);
+    output.push({ start: offset, end: offset + runText.length, raw: runText, kind: 'numeric-cluster', numericLabels: labels, ...recognitionFields(mappedNumericRecognition(labels, references)), priority: 70 });
   }
   return output;
 }
@@ -294,11 +359,11 @@ function scanTextPart(part: string, xml: string, sourceSha: string): CitationDoc
   const units: CitationDocumentUnitV1[] = [];
   const items = paragraphs(xml);
   let referenceSection = false;
-  const referenceIdentifiers = new Map<number, CitationIdentifierV1[]>();
+  const referenceIdentifiers = new Map<number, FixedRecognition>();
   let pendingReference: { label: number; text: string } | undefined;
   const flushReference = () => {
     if (!pendingReference) return;
-    referenceIdentifiers.set(pendingReference.label, identifiersFromText(pendingReference.text, true));
+    referenceIdentifiers.set(pendingReference.label, fixedRecognitionFromText(pendingReference.text, true));
     pendingReference = undefined;
   };
   for (const paragraph of items) {
@@ -318,30 +383,33 @@ function scanTextPart(part: string, xml: string, sourceSha: string): CitationDoc
     const trimmed = paragraph.text.trim();
     if (REFERENCE_HEADING_PATTERN.test(trimmed)) { referenceSection = true; continue; }
     if (!trimmed) continue;
-    const candidates: Candidate[] = [...fieldCandidates(paragraph.xml, referenceIdentifiers), ...superscriptCandidates(paragraph.xml, paragraph.text)];
-    addMatches(candidates, paragraph.text, PLACEHOLDER_PATTERN, 'placeholder', 130);
-    for (const match of doiMatches(paragraph.text)) candidates.push({ ...match, kind: 'doi', identifiers: [{ doi: match.doi }], priority: 90 });
-    addMatches(candidates, paragraph.text, PMID_PATTERN, 'pmid', 90, (match) => ({ identifiers: [{ pmid: match[1] ?? '' }] }));
-    addMatches(candidates, paragraph.text, ARXIV_PATTERN, 'arxiv', 85, (match) => ({ identifiers: [{ arxivId: (match[1] ?? '').replace(/v\d+$/iu, '') }] }));
+    const candidates: Candidate[] = [...fieldCandidates(paragraph.xml, referenceIdentifiers), ...superscriptCandidates(paragraph.xml, paragraph.text, referenceIdentifiers)];
+    addMatches(candidates, paragraph.text, PLACEHOLDER_PATTERN, 'placeholder', 130, () => ({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }));
+    for (const match of doiMatches(paragraph.text)) candidates.push({ ...match, kind: 'doi', identifiers: [{ doi: match.doi }], recognitionStatus: 'recognized', recognizedFormat: 'doi', priority: 90 });
+    addMatches(candidates, paragraph.text, PMID_PATTERN, 'pmid', 90, (match) => ({ identifiers: [{ pmid: match[1] ?? '' }], recognitionStatus: 'recognized', recognizedFormat: 'pmid' }));
+    addMatches(candidates, paragraph.text, ARXIV_PATTERN, 'arxiv', 85, (match) => ({ identifiers: [{ arxivId: (match[1] ?? '').replace(/v\d+$/iu, '') }], recognitionStatus: 'recognized', recognizedFormat: 'arxiv' }));
+    addMatches(candidates, paragraph.text, BARE_ARXIV_PATTERN, 'arxiv', 45, () => ({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }));
     addMatches(candidates, paragraph.text, NUMERIC_CLUSTER_PATTERN, 'numeric-cluster', 65, (match) => {
       const labels = numericLabels(match[1] ?? '');
-      return { numericLabels: labels, identifiers: labels.flatMap((label) => referenceIdentifiers.get(label) ?? []) };
+      return { numericLabels: labels, ...recognitionFields(mappedNumericRecognition(labels, referenceIdentifiers)) };
     });
-    addMatches(candidates, paragraph.text, AUTHOR_DATE_PATTERN, 'author-date', 50, (match) => ({ identifiers: identifiersFromText(match[0], false) }));
+    addMatches(candidates, paragraph.text, AUTHOR_DATE_PATTERN, 'author-date', 50, () => ({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }));
     if (referenceSection) {
-      const exactIdentifiers = identifiersFromText(trimmed, false);
-      const doiOccurrences = doiMatches(trimmed);
-      const residueAfterLastDoi = doiOccurrences.length > 0 ? trimmed.slice(doiOccurrences.at(-1)!.end).trim() : '';
-      const canTreatAsOneEntry = exactIdentifiers.length === 0 || (exactIdentifiers.length === 1 && residueAfterLastDoi.length <= 16);
-      if (canTreatAsOneEntry) {
+      const recognition = fixedRecognitionFromText(trimmed, true);
+      const start = paragraph.text.indexOf(trimmed);
+      candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'reference-entry', ...recognitionFields(recognition), priority: 110 });
+    } else {
+      const recognition = fixedRecognitionFromText(trimmed, false);
+      if (recognition.format === 'labeled-title') {
         const start = paragraph.text.indexOf(trimmed);
-        candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'reference-entry', identifiers: exactIdentifiers.length > 0 ? exactIdentifiers : identifiersFromText(trimmed, true), priority: 110 });
+        candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'title', ...recognitionFields(recognition), priority: 75 });
       }
-    } else if (candidates.length === 0 && trimmed.length >= 30 && trimmed.length <= 300 && !/[\u3400-\u9fff]/u.test(trimmed) && (trimmed.match(/[A-Za-z]+/gu)?.length ?? 0) >= 6 && !/[.!?]\s+.+[.!?]/u.test(trimmed)) {
+    }
+    if (!referenceSection && candidates.length === 0 && trimmed.length >= 30 && trimmed.length <= 300 && !/[\u3400-\u9fff]/u.test(trimmed) && (trimmed.match(/[A-Za-z]+/gu)?.length ?? 0) >= 6 && !/[.!?]\s+.+[.!?]/u.test(trimmed)) {
       const title = stripReferenceLabel(trimmed).replace(/[.;,]+$/u, '').trim();
       if (title.length >= 18) {
         const start = paragraph.text.indexOf(trimmed);
-        candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'title', identifiers: [{ title }], priority: 10 });
+        candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'title', identifiers: [], recognitionStatus: 'needs_input', recognizedFormat: 'unsupported', priority: 10 });
       }
     }
 
@@ -358,6 +426,8 @@ function scanTextPart(part: string, xml: string, sourceSha: string): CitationDoc
         context: paragraph.text.slice(contextStart, contextEnd),
         kind: candidate.kind,
         referenceOnly: referenceSection || candidate.kind === 'reference-entry',
+        recognitionStatus: candidate.recognitionStatus ?? ((candidate.identifiers?.length ?? 0) > 0 ? 'recognized' : 'needs_input'),
+        recognizedFormat: candidate.recognizedFormat ?? ((candidate.identifiers?.length ?? 0) > 0 ? 'structured-reference' : 'unsupported'),
         ...(candidate.identifiers && candidate.identifiers.length > 0 ? { identifiers: candidate.identifiers } : {}),
         ...(candidate.numericLabels && candidate.numericLabels.length > 0 ? { numericLabels: candidate.numericLabels } : {}),
       });
@@ -384,20 +454,55 @@ function textUnits(text: string, sourceSha: string, format: 'markdown' | 'tex'):
     paragraphStart = separatorStart + separator[0].length;
   }
   paragraphs.push({ text: text.slice(paragraphStart), start: paragraphStart });
+  const referenceIdentifiers = new Map<number, FixedRecognition>();
   let referenceSection = false;
+  for (const entry of paragraphs) {
+    const trimmed = entry.text.trim();
+    if (REFERENCE_HEADING_PATTERN.test(trimmed.replace(/^#+\s*/u, ''))) { referenceSection = true; continue; }
+    if (!referenceSection || !trimmed) continue;
+    const label = referenceLabel(trimmed);
+    if (label) referenceIdentifiers.set(label, fixedRecognitionFromText(trimmed, true));
+  }
+  referenceSection = false;
   for (const [paragraphIndex, entry] of paragraphs.entries()) {
     const paragraph = entry.text;
     const trimmed = paragraph.trim();
     if (REFERENCE_HEADING_PATTERN.test(trimmed.replace(/^#+\s*/u, ''))) { referenceSection = true; continue; }
     const candidates: Candidate[] = [];
-    addMatches(candidates, paragraph, PLACEHOLDER_PATTERN, 'placeholder', 130);
-    for (const match of doiMatches(paragraph)) candidates.push({ ...match, kind: 'doi', identifiers: [{ doi: match.doi }], priority: 90 });
-    addMatches(candidates, paragraph, NUMERIC_CLUSTER_PATTERN, 'numeric-cluster', 60, (match) => ({ numericLabels: numericLabels(match[1] ?? '') }));
-    if (format === 'markdown') addMatches(candidates, paragraph, /\[@[^\]]+\]/gu, 'zotero-field', 95);
-    else addMatches(candidates, paragraph, /\\(?:cite|citep|citet|autocite|parencite)\{[^}]+\}/gu, 'zotero-field', 95);
+    addMatches(candidates, paragraph, PLACEHOLDER_PATTERN, 'placeholder', 130, () => ({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }));
+    for (const match of doiMatches(paragraph)) candidates.push({ ...match, kind: 'doi', identifiers: [{ doi: match.doi }], recognitionStatus: 'recognized', recognizedFormat: 'doi', priority: 90 });
+    addMatches(candidates, paragraph, PMID_PATTERN, 'pmid', 90, (match) => ({ identifiers: [{ pmid: match[1] ?? '' }], recognitionStatus: 'recognized', recognizedFormat: 'pmid' }));
+    addMatches(candidates, paragraph, ARXIV_PATTERN, 'arxiv', 85, (match) => ({ identifiers: [{ arxivId: (match[1] ?? '').replace(/v\d+$/iu, '') }], recognitionStatus: 'recognized', recognizedFormat: 'arxiv' }));
+    addMatches(candidates, paragraph, BARE_ARXIV_PATTERN, 'arxiv', 45, () => ({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }));
+    addMatches(candidates, paragraph, NUMERIC_CLUSTER_PATTERN, 'numeric-cluster', 60, (match) => {
+      const labels = numericLabels(match[1] ?? '');
+      return { numericLabels: labels, ...recognitionFields(mappedNumericRecognition(labels, referenceIdentifiers)) };
+    });
+    addMatches(candidates, paragraph, AUTHOR_DATE_PATTERN, 'author-date', 50, () => ({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }));
+    if (format === 'markdown') {
+      addMatches(candidates, paragraph, /\[(?:[^\]@]*@[A-Za-z0-9][A-Za-z0-9_.:-]*[^\]]*)\]/gu, 'zotero-field', 95, (match) => {
+        const keys = [...match[0].matchAll(/@([A-Za-z0-9][A-Za-z0-9_.:-]*)/gu)].map((key) => key[1]!).filter(Boolean);
+        return { identifiers: keys.map((managerKey) => ({ manager: 'zotero' as const, managerKey })), recognitionStatus: keys.length > 0 ? 'recognized' : 'needs_input', recognizedFormat: 'pandoc-zotero-key' };
+      });
+    } else {
+      addMatches(candidates, paragraph, /\\(?:cite|citep|citet|autocite|parencite)\{[^}]+\}/gu, 'zotero-field', 95, (match) => {
+        const keys = (match[0].match(/\{([^}]+)\}/u)?.[1] ?? '').split(',').map((key) => key.trim()).filter((key) => /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u.test(key));
+        return { identifiers: keys.map((managerKey) => ({ manager: 'zotero' as const, managerKey })), recognitionStatus: keys.length > 0 ? 'recognized' : 'needs_input', recognizedFormat: 'tex-citation-key' };
+      });
+    }
     if (referenceSection && trimmed) {
       const start = paragraph.indexOf(trimmed);
-      candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'reference-entry', identifiers: identifiersFromText(trimmed, true), priority: 110 });
+      candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'reference-entry', ...recognitionFields(fixedRecognitionFromText(trimmed, true)), priority: 110 });
+    } else {
+      const recognition = fixedRecognitionFromText(trimmed, false);
+      if (recognition.format === 'labeled-title') {
+        const start = paragraph.indexOf(trimmed);
+        candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'title', ...recognitionFields(recognition), priority: 75 });
+      }
+    }
+    if (!referenceSection && candidates.length === 0 && trimmed.length >= 30 && trimmed.length <= 300 && (trimmed.match(/[A-Za-z]+/gu)?.length ?? 0) >= 6) {
+      const start = paragraph.indexOf(trimmed);
+      candidates.push({ start, end: start + trimmed.length, raw: trimmed, kind: 'title', identifiers: [], recognitionStatus: 'needs_input', recognizedFormat: 'unsupported', priority: 10 });
     }
     for (const candidate of nonOverlapping(candidates)) {
       const absoluteStart = entry.start + candidate.start;
@@ -406,6 +511,8 @@ function textUnits(text: string, sourceSha: string, format: 'markdown' | 'tex'):
         part: 'body', paragraphIndex, start: absoluteStart, end: entry.start + candidate.end, raw: candidate.raw,
         context: paragraph.slice(Math.max(0, candidate.start - 280), Math.min(paragraph.length, candidate.end + 280)),
         kind: candidate.kind, referenceOnly: referenceSection || candidate.kind === 'reference-entry',
+        recognitionStatus: candidate.recognitionStatus ?? ((candidate.identifiers?.length ?? 0) > 0 ? 'recognized' : 'needs_input'),
+        recognizedFormat: candidate.recognizedFormat ?? ((candidate.identifiers?.length ?? 0) > 0 ? 'structured-reference' : 'unsupported'),
         ...(candidate.identifiers && candidate.identifiers.length > 0 ? { identifiers: candidate.identifiers } : {}),
         ...(candidate.numericLabels && candidate.numericLabels.length > 0 ? { numericLabels: candidate.numericLabels } : {}),
       });
@@ -740,6 +847,7 @@ export class CitationDocumentService {
       detectedStyleFamily: authorDateCount > numericCount ? 'author-date' : 'numeric',
       units,
       warnings,
+      supportedInputFormats: CITATION_SUPPORTED_INPUT_FORMATS_V1,
     };
   }
 

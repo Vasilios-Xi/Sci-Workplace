@@ -12,6 +12,7 @@ import { BibliographyService } from '../src/workbench/bibliography-service.js';
 import { CitationDocumentService } from '../src/workbench/citation-document-service.js';
 import { ZoteroHostService } from '../src/workbench/zotero-host-service.js';
 import { RestrictedDocxZoteroProcessor, ZoteroHttpCitingAdapter } from '../src/workbench/zotero-document-processor-adapter.js';
+import citationPlugin from '../../citation-plugin/src/index.js';
 
 const roots: string[] = [];
 
@@ -73,9 +74,9 @@ describe('Citation document scanning and safe materialization', () => {
     const numeric = inspection.units.find((unit) => unit.kind === 'numeric-cluster');
     const placeholder = inspection.units.find((unit) => unit.kind === 'placeholder');
     const reference = inspection.units.find((unit) => unit.kind === 'reference-entry');
-    expect(numeric).toMatchObject({ raw: '[1]', numericLabels: [1], identifiers: [{ doi: '10.1234/example' }], referenceOnly: false });
-    expect(placeholder).toMatchObject({ raw: '[XX]', referenceOnly: false });
-    expect(reference).toMatchObject({ referenceOnly: true, identifiers: [{ doi: '10.1234/example' }] });
+    expect(numeric).toMatchObject({ raw: '[1]', numericLabels: [1], identifiers: [{ doi: '10.1234/example' }], referenceOnly: false, recognitionStatus: 'recognized', recognizedFormat: 'mapped-numeric' });
+    expect(placeholder).toMatchObject({ raw: '[XX]', referenceOnly: false, recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' });
+    expect(reference).toMatchObject({ referenceOnly: true, identifiers: [{ doi: '10.1234/example' }], recognitionStatus: 'recognized', recognizedFormat: 'structured-reference' });
 
     const plan = {
       schemaVersion: 1 as const,
@@ -182,7 +183,7 @@ describe('Citation document scanning and safe materialization', () => {
     expect(receipt.dynamicFieldCount).toBe(1);
   });
 
-  it('treats a standalone full title as identity data without inventing an author', () => {
+  it('lists an unlabeled standalone title for user input instead of guessing its identity', () => {
     const root = temporaryDirectory();
     const zip = new AdmZip();
     zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
@@ -194,10 +195,49 @@ describe('Citation document scanning and safe materialization', () => {
     expect(unit).toMatchObject({
       kind: 'title',
       raw: '34（A statistical understanding of oxygen vacancies in distorted high-entropy perovskite oxides ）',
-      identifiers: [{ title: 'A statistical understanding of oxygen vacancies in distorted high-entropy perovskite oxides' }],
+      recognitionStatus: 'needs_input',
+      recognizedFormat: 'unsupported',
     });
-    expect(unit?.identifiers?.[0]).not.toHaveProperty('firstAuthor');
-    expect(unit?.identifiers?.[0]).not.toHaveProperty('year');
+    expect(unit?.identifiers).toBeUndefined();
+  });
+
+  it('uses an explicit recognition whitelist and preserves deterministic source locators', () => {
+    const root = temporaryDirectory();
+    const zip = new AdmZip();
+    zip.addFile('[Content_Types].xml', Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
+    zip.addFile('word/document.xml', Buffer.from([
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>',
+      '<w:p><w:r><w:t>Mapped [1], unmapped [2], bare 2401.01234, accepted arXiv: 2401.01235.</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>Title: A deliberately exact and sufficiently long scholarly article title</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>A claim (Smith et al., 2024).</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>References</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>[1] Smith J. A complete scholarly article title. Journal of Tests. 2024. doi:10.1234/example.</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>[2] incomplete reference text</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>[3] Smith, J. (2024). Another complete scholarly article title. Journal of Tests, 12(3), 1-9.</w:t></w:r></w:p>',
+      '<w:p><w:r><w:t>[4] Smith J. A GB T styled complete scholarly article title[J]. Journal of Tests, 2024, 12(3):1-9.</w:t></w:r></w:p>',
+      '<w:sectPr/>',
+      '</w:body></w:document>',
+    ].join('')));
+    const bytes = zip.toBuffer();
+    writeFileSync(join(root, 'whitelist.docx'), bytes);
+    const source: DocumentRevisionRef = { ref: { rootId: 'project', path: 'whitelist.docx' }, sha256: digest(bytes), mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+    const inspection = new CitationDocumentService({ resolveRoot: () => root }).scan(source);
+    expect(inspection.supportedInputFormats?.map((format) => format.id)).toEqual(expect.arrayContaining(['doi', 'pmid', 'arxiv', 'labeled-title', 'structured-reference', 'zotero-field', 'endnote-field', 'numeric-mapped-reference']));
+    expect(inspection.units.find((unit) => unit.raw === '[1]')).toMatchObject({ recognitionStatus: 'recognized', recognizedFormat: 'mapped-numeric', identifiers: [{ doi: '10.1234/example' }] });
+    expect(inspection.units.find((unit) => unit.raw === '[2]')).toMatchObject({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' });
+    expect(inspection.units.find((unit) => unit.raw === '2401.01234')).toMatchObject({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' });
+    expect(inspection.units.find((unit) => unit.raw === 'arXiv: 2401.01235')).toMatchObject({ recognitionStatus: 'recognized', recognizedFormat: 'arxiv', identifiers: [{ arxivId: '2401.01235' }] });
+    expect(inspection.units.find((unit) => unit.kind === 'title')).toMatchObject({ recognitionStatus: 'recognized', recognizedFormat: 'labeled-title', identifiers: [{ title: 'A deliberately exact and sufficiently long scholarly article title' }] });
+    expect(inspection.units.find((unit) => unit.kind === 'author-date')).toMatchObject({ recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' });
+    expect(inspection.units.find((unit) => unit.raw.includes('Another complete scholarly'))).toMatchObject({ recognitionStatus: 'recognized', recognizedFormat: 'structured-reference', identifiers: [{ title: 'Another complete scholarly article title', year: 2024, firstAuthor: 'Smith' }] });
+    expect(inspection.units.find((unit) => unit.raw.includes('GB T styled'))).toMatchObject({ recognitionStatus: 'recognized', recognizedFormat: 'structured-reference', identifiers: [{ title: 'A GB T styled complete scholarly article title', year: 2024, firstAuthor: 'Smith' }] });
+    for (const unit of inspection.units) {
+      expect(unit.part).toBe('word/document.xml');
+      expect(unit.paragraphIndex).toBeGreaterThanOrEqual(0);
+      expect(unit.end).toBeGreaterThan(unit.start);
+      expect(unit.context).toContain(unit.raw);
+    }
   });
 
   it('converts the complete nested EndNote field instead of nesting a Zotero field inside it', () => {
@@ -212,7 +252,7 @@ describe('Citation document scanning and safe materialization', () => {
     const service = new CitationDocumentService({ resolveRoot: () => root });
     const inspection = service.scan(source);
     const unit = inspection.units.find((candidate) => candidate.kind === 'endnote-field')!;
-    expect(unit).toMatchObject({ raw: '1', identifiers: [{ manager: 'endnote', managerKey: '42', doi: '10.1234/example', title: RECORD.title }] });
+    expect(unit).toMatchObject({ raw: '1', identifiers: [{ manager: 'endnote', managerKey: '42', doi: '10.1234/example', title: RECORD.title }], recognitionStatus: 'recognized', recognizedFormat: 'endnote-field' });
     const receipt = service.materialize({
       schemaVersion: 1, operationKey: 'endnote-complete-field', source, format: 'docx', styleId: 'vancouver', styleFamily: 'numeric', bibliographyPolicy: 'dynamic-resolved-with-unresolved-review',
       edits: [{ unitId: unit.id, originalText: unit.raw, displayText: '[1]', status: 'applied', reason: 'verified', record: RECORD, zoteroItemKey: 'ITEMKEY1', zoteroItemUri: 'http://zotero.org/users/123/items/ITEMKEY1' }],
@@ -243,6 +283,26 @@ describe('Citation document scanning and safe materialization', () => {
       expect(revised).toContain(expected);
       expect(revised).toContain('[XX]');
       expect(readFileSync(join(root, name), 'utf8')).toBe(text);
+    }
+  });
+
+  it('recognizes only explicit Pandoc and TeX Zotero keys in text drafts', () => {
+    const root = temporaryDirectory();
+    const service = new CitationDocumentService({ resolveRoot: () => root });
+    for (const [name, text, format] of [
+      ['keys.md', 'Claim [@ABCD1234; @EFGH5678].', 'pandoc-zotero-key'],
+      ['keys.tex', 'Claim \\parencite{ABCD1234,EFGH5678}.', 'tex-citation-key'],
+    ] as const) {
+      const bytes = Buffer.from(text);
+      writeFileSync(join(root, name), bytes);
+      const source: DocumentRevisionRef = { ref: { rootId: 'project', path: name }, sha256: digest(bytes) };
+      const [unit] = service.scan(source).units;
+      expect(unit).toMatchObject({
+        kind: 'zotero-field',
+        recognitionStatus: 'recognized',
+        recognizedFormat: format,
+        identifiers: [{ manager: 'zotero', managerKey: 'ABCD1234' }, { manager: 'zotero', managerKey: 'EFGH5678' }],
+      });
     }
   });
 
@@ -551,13 +611,53 @@ describe('Zotero native attachment idempotency across Harness restarts', () => {
 });
 
 describe('bundled Citation Workbench plugin boundary', () => {
+  it('accepts a user-supplied fixed-format reference only through a new preview', async () => {
+    const source: DocumentRevisionRef = { ref: { rootId: 'project', path: 'draft.docx' }, sha256: 'a'.repeat(64), mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+    const resolvedQueries: Array<Record<string, unknown>> = [];
+    const host = {
+      workbenches: { inspect: async () => ({ id: 'citation-instance', revision: 7, inputs: { source: { rootId: 'project', path: 'draft.docx', sha256: source.sha256, mediaType: source.mediaType } } }) },
+      bibliography: {
+        scanDocument: async () => ({
+          schemaVersion: 1, source, format: 'docx', detectedStyleFamily: 'numeric', warnings: [], supportedInputFormats: [],
+          units: [{ id: 'unit-placeholder', part: 'word/document.xml', paragraphIndex: 2, start: 8, end: 12, raw: '[XX]', context: 'Claim [XX] remains.', kind: 'placeholder', referenceOnly: false, recognitionStatus: 'needs_input', recognizedFormat: 'unsupported' }],
+        }),
+        resolve: async (request: { queries: Array<Record<string, unknown>> }) => {
+          resolvedQueries.push(...request.queries);
+          return request.queries.map((query) => ({ queryId: query.id, status: 'resolved', match: 'exact_identifier', record: RECORD, candidates: [{ record: RECORD, match: 'exact_identifier', score: 1 }], issues: [] }));
+        },
+        verifyMetadata: async () => ({ status: 'verified', record: RECORD, issues: [], verifiedAt: '2026-01-01T00:00:00.000Z' }),
+      },
+      zotero: {
+        planSync: async (request: ZoteroSyncPlanRequestV1) => ({ schemaVersion: 1, id: 'preview-plan', operationKey: request.operationKey, sourceSha256: request.sourceSha256, target: request.target, operations: [{ canonicalId: RECORD.canonicalId, action: 'create', attachmentCount: 0 }], expiresAt: '2026-12-01T00:00:00.000Z' }),
+        status: async () => ({ schemaVersion: 1, available: true, mode: 'companion', capabilities: ['read', 'write', 'collections'] }),
+      },
+      models: { list: async () => [{ id: 'test-model', isDefault: true }] },
+      storage: { get: async () => undefined },
+    };
+    const tool = citationPlugin.tools.find((candidate) => candidate.definition.name === 'citation.prepare')!;
+    const result = await tool.execute({ instanceId: 'citation-instance', referenceOverrides: [{ unitId: 'unit-placeholder', referenceText: 'DOI: 10.1234/example' }] }, { host, traceId: 'preview-trace' } as never);
+    expect(resolvedQueries).toEqual([expect.objectContaining({ id: 'unit-placeholder:0', doi: '10.1234/example', raw: 'DOI: 10.1234/example' })]);
+    expect(result.metadata).toMatchObject({ referenceOverrideCount: 1, identityEligibleUnits: 1, currentlySkippedUnits: 0, recognitionItems: [{ unitId: 'unit-placeholder', suppliedReference: 'DOI: 10.1234/example', identityStatus: 'applied', locator: { paragraphNumber: 3, start: 8, end: 12 } }] });
+    await expect(tool.execute({ instanceId: 'citation-instance', referenceOverrides: [{ unitId: 'unit-placeholder', referenceText: 'probably this paper' }] }, { host, traceId: 'invalid-preview' } as never)).rejects.toThrow(/不属于可识别格式/u);
+  });
+
   it('loads as trusted and default-enabled without raw network/process permissions', async () => {
     const repository = join(import.meta.dirname, '..', '..', '..');
     const pluginRoot = join(repository, 'packages', 'citation-plugin');
     const manifest = validatePluginManifest(JSON.parse(readFileSync(join(pluginRoot, 'manifest.json'), 'utf8')), pluginRoot);
     expect(manifest.id).toBe('sci.citation-workbench');
+    expect(manifest.version).toBe('1.1.0');
     expect(manifest.permissions).toEqual(expect.arrayContaining(['bibliography:resolve', 'zotero:write', 'zotero:documents']));
     expect(manifest.permissions).not.toEqual(expect.arrayContaining(['network', 'process:spawn', 'project:write']));
+    const panel = readFileSync(join(pluginRoot, 'panel.html'), 'utf8');
+    expect(panel).toContain('插件只识别以下固定格式');
+    expect(panel).toContain('data-locate=');
+    expect(panel).toContain('data-override=');
+    expect(panel).toContain('referenceOverrides');
+    expect(panel).toContain("tool:'citation.prepare'");
+    expect(panel).not.toContain("tool:'citation.recheck'");
+    expect(panel).toContain("rpc('evidence.reveal'");
+    expect(panel).toContain('sci.citation-workbench.unit.v1');
     const projectRoot = temporaryDirectory('citation-bundled-project-');
     mkdirSync(projectRoot, { recursive: true });
     const manager = new PluginManager({ userRoot: join(projectRoot, '.user-plugins'), projectRoot, projectId: 'citation-project', registry: new ToolRegistry(), bundledRoots: [pluginRoot], hostHandler: async () => [] });

@@ -3,7 +3,7 @@
   "apiVersion": 4,
   "id": "sci.citation-workbench",
   "name": "Citation Workbench",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "engine": "^0.1.0",
   "entry": "dist/index.js",
   "permissions": [
@@ -64,7 +64,20 @@
             "collectionKey": { "type": "string" },
             "collectionRoot": { "type": "string" },
             "collectionChild": { "type": "string" },
-            "retryUnitIds": { "type": "array", "items": { "type": "string" }, "maxItems": 2000 }
+            "retryUnitIds": { "type": "array", "items": { "type": "string" }, "maxItems": 2000 },
+            "referenceOverrides": {
+              "type": "array",
+              "maxItems": 2000,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "unitId": { "type": "string", "maxLength": 200 },
+                  "referenceText": { "type": "string", "maxLength": 16000 }
+                },
+                "required": ["unitId", "referenceText"],
+                "additionalProperties": false
+              }
+            }
           },
           "required": ["instanceId", "source", "operationKey", "styleId", "styleFamily", "model", "maximumTotalTokens", "collectionRoot", "collectionChild"],
           "additionalProperties": false
@@ -75,7 +88,7 @@
       {
         "schemaVersion": 1,
         "id": "sci.citation-workbench:submission-citations",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "title": "论文级引用",
         "description": "自动核验已有引用、保守跳过争议项，并同步到 Zotero。",
         "icon": "book-check",
